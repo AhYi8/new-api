@@ -71,6 +71,143 @@ func clearChannelInfo(channel *model.Channel) {
 	}
 }
 
+type multiKeyStateSnapshot struct {
+	status         int
+	disabledReason string
+	disabledTime   int64
+}
+
+func splitMultiKeyValues(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+
+	if strings.HasPrefix(trimmed, "[") {
+		var arr []json.RawMessage
+		if err := common.Unmarshal([]byte(trimmed), &arr); err == nil {
+			values := make([]string, 0, len(arr))
+			for _, item := range arr {
+				value := strings.TrimSpace(string(item))
+				if value != "" {
+					values = append(values, value)
+				}
+			}
+			if len(values) > 0 {
+				return values
+			}
+		}
+	}
+
+	parts := strings.Split(trimmed, "\n")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		value := strings.TrimSpace(part)
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
+func normalizeMultiKeyValue(value string) string {
+	return strings.TrimSpace(value)
+}
+
+func rebuildMultiKeyStatus(originInfo model.ChannelInfo, originKey string, updatedKey string, keyMode string) model.ChannelInfo {
+	updatedKeys := splitMultiKeyValues(updatedKey)
+	originInfo.MultiKeySize = len(updatedKeys)
+
+	if keyMode != "append" || len(updatedKeys) == 0 {
+		originInfo.MultiKeyStatusList = nil
+		originInfo.MultiKeyDisabledReason = nil
+		originInfo.MultiKeyDisabledTime = nil
+		originInfo.MultiKeyPollingIndex = 0
+		return originInfo
+	}
+
+	originKeys := splitMultiKeyValues(originKey)
+	if len(originKeys) == 0 {
+		originInfo.MultiKeyStatusList = nil
+		originInfo.MultiKeyDisabledReason = nil
+		originInfo.MultiKeyDisabledTime = nil
+		originInfo.MultiKeyPollingIndex = 0
+		return originInfo
+	}
+
+	snapshots := make([]multiKeyStateSnapshot, len(originKeys))
+	for i, key := range originKeys {
+		snapshots[i] = multiKeyStateSnapshot{status: common.ChannelStatusEnabled}
+		if originInfo.MultiKeyStatusList != nil {
+			if status, exists := originInfo.MultiKeyStatusList[i]; exists {
+				snapshots[i].status = status
+			}
+		}
+		if originInfo.MultiKeyDisabledReason != nil {
+			if reason, exists := originInfo.MultiKeyDisabledReason[i]; exists {
+				snapshots[i].disabledReason = reason
+			}
+		}
+		if originInfo.MultiKeyDisabledTime != nil {
+			if disabledTime, exists := originInfo.MultiKeyDisabledTime[i]; exists {
+				snapshots[i].disabledTime = disabledTime
+			}
+		}
+		originKeys[i] = normalizeMultiKeyValue(key)
+	}
+
+	availableIndexes := make(map[string][]int, len(originKeys))
+	for i, key := range originKeys {
+		availableIndexes[key] = append(availableIndexes[key], i)
+	}
+
+	nextStatusList := make(map[int]int, len(updatedKeys))
+	nextDisabledReason := make(map[int]string, len(updatedKeys))
+	nextDisabledTime := make(map[int]int64, len(updatedKeys))
+
+	for i, key := range updatedKeys {
+		normalized := normalizeMultiKeyValue(key)
+		if normalized == "" {
+			continue
+		}
+
+		indexes := availableIndexes[normalized]
+		if len(indexes) == 0 {
+			continue
+		}
+
+		originIndex := indexes[0]
+		availableIndexes[normalized] = indexes[1:]
+
+		snapshot := snapshots[originIndex]
+		if snapshot.status != common.ChannelStatusEnabled {
+			nextStatusList[i] = snapshot.status
+			if snapshot.disabledReason != "" {
+				nextDisabledReason[i] = snapshot.disabledReason
+			}
+			if snapshot.disabledTime != 0 {
+				nextDisabledTime[i] = snapshot.disabledTime
+			}
+		}
+	}
+
+	if len(nextStatusList) == 0 {
+		nextStatusList = nil
+	}
+	if len(nextDisabledReason) == 0 {
+		nextDisabledReason = nil
+	}
+	if len(nextDisabledTime) == 0 {
+		nextDisabledTime = nil
+	}
+
+	originInfo.MultiKeySize = len(updatedKeys)
+	originInfo.MultiKeyStatusList = nextStatusList
+	originInfo.MultiKeyDisabledReason = nextDisabledReason
+	originInfo.MultiKeyDisabledTime = nextDisabledTime
+	return originInfo
+}
+
 func applyChannelStatusFilter(query *gorm.DB, statusFilter int) *gorm.DB {
 	if statusFilter == common.ChannelStatusEnabled {
 		return query.Where("status = ?", common.ChannelStatusEnabled)
@@ -1054,7 +1191,13 @@ func UpdateChannel(c *gin.Context) {
 				channel.Key = strings.Join(allKeys, "\n")
 			}
 		case "replace":
-			// 覆盖模式：直接使用新密钥（默认行为，不需要特殊处理）
+			// 覆盖模式按新建密钥处理，后续统一清理旧状态元数据。
+		}
+	}
+	if channel.ChannelInfo.IsMultiKey && channel.Key != "" && channel.KeyMode != nil {
+		switch *channel.KeyMode {
+		case "append", "replace":
+			channel.ChannelInfo = rebuildMultiKeyStatus(originChannel.ChannelInfo, originChannel.Key, channel.Key, *channel.KeyMode)
 		}
 	}
 	err = channel.Update()

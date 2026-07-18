@@ -1,8 +1,11 @@
 .github
 .git
+.codegraph
+.local-tests
 *.md
 .vscode
 .gitignore
+.env
 Makefile
 docs
 .eslintcache

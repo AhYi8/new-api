@@ -151,6 +151,69 @@ func TestUpdateChannelRejectsStatusField(t *testing.T) {
 	assert.False(t, response.Success)
 }
 
+func TestRebuildMultiKeyStatusPreservesExistingKeyState(t *testing.T) {
+	originInfo := model.ChannelInfo{
+		IsMultiKey:   true,
+		MultiKeySize: 2,
+		MultiKeyStatusList: map[int]int{
+			0: common.ChannelStatusManuallyDisabled,
+		},
+		MultiKeyDisabledReason: map[int]string{
+			0: "manual disabled",
+		},
+		MultiKeyDisabledTime: map[int]int64{
+			0: 123456,
+		},
+	}
+
+	updated := rebuildMultiKeyStatus(
+		originInfo,
+		"disabled-key\nenabled-key",
+		"enabled-key\ndisabled-key\nnew-key",
+		"append",
+	)
+
+	require.Equal(t, 3, updated.MultiKeySize)
+	assert.Equal(t, common.ChannelStatusManuallyDisabled, updated.MultiKeyStatusList[1])
+	assert.Equal(t, "manual disabled", updated.MultiKeyDisabledReason[1])
+	assert.Equal(t, int64(123456), updated.MultiKeyDisabledTime[1])
+	assert.NotContains(t, updated.MultiKeyStatusList, 0)
+	assert.NotContains(t, updated.MultiKeyStatusList, 2)
+}
+
+func TestRebuildMultiKeyStatusTreatsReplaceAsNewKeys(t *testing.T) {
+	originInfo := model.ChannelInfo{
+		IsMultiKey:           true,
+		MultiKeySize:         2,
+		MultiKeyPollingIndex: 1,
+		MultiKeyStatusList: map[int]int{
+			0: common.ChannelStatusManuallyDisabled,
+			1: common.ChannelStatusManuallyDisabled,
+		},
+		MultiKeyDisabledReason: map[int]string{
+			0: "manual disabled",
+			1: "manual disabled",
+		},
+		MultiKeyDisabledTime: map[int]int64{
+			0: 123456,
+			1: 234567,
+		},
+	}
+
+	updated := rebuildMultiKeyStatus(
+		originInfo,
+		"disabled-key\nenabled-key",
+		"enabled-key\nanother-key",
+		"replace",
+	)
+
+	require.Equal(t, 2, updated.MultiKeySize)
+	assert.Nil(t, updated.MultiKeyStatusList)
+	assert.Nil(t, updated.MultiKeyDisabledReason)
+	assert.Nil(t, updated.MultiKeyDisabledTime)
+	assert.Zero(t, updated.MultiKeyPollingIndex)
+}
+
 func TestChannelStatusValidation(t *testing.T) {
 	assert.True(t, isManageableChannelStatus(common.ChannelStatusEnabled))
 	assert.True(t, isManageableChannelStatus(common.ChannelStatusManuallyDisabled))
