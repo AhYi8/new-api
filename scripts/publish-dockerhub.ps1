@@ -80,19 +80,19 @@ function Invoke-NativeCommandWithRetry {
         [int]$DelaySeconds = 5
     )
 
-    $lastExitCode = 0
+    $nativeExitCode = 0
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
         $previousErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         try {
             & $Command @Arguments
-            $lastExitCode = $LASTEXITCODE
+            $nativeExitCode = $LASTEXITCODE
         }
         finally {
             $ErrorActionPreference = $previousErrorActionPreference
         }
 
-        if ($lastExitCode -eq 0) {
+        if ($nativeExitCode -eq 0) {
             return
         }
 
@@ -103,7 +103,7 @@ function Invoke-NativeCommandWithRetry {
         }
     }
 
-    throw (Get-Message -Key 'NativeCommandFailed' -Values @($lastExitCode, $Command, ($Arguments -join ' ')))
+    throw (Get-Message -Key 'NativeCommandFailed' -Values @($nativeExitCode, $Command, ($Arguments -join ' ')))
 }
 
 function Test-DockerHubCredential {
