@@ -193,6 +193,7 @@ $imagePath = "ahyi/$Repository"
 $versionImage = "${imagePath}:$Version"
 $latestImage = "${imagePath}:personal-latest"
 $platform = 'linux/amd64'
+$builderName = 'new-api-publisher'
 $temporaryRoot = $null
 $smokeContainer = $null
 $localImage = $null
@@ -228,6 +229,32 @@ try {
 
     Invoke-NativeCommand -Command 'docker' -Arguments @('version')
     Invoke-NativeCommand -Command 'docker' -Arguments @('buildx', 'version')
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & docker buildx inspect $builderName *> $null
+        $builderExists = $LASTEXITCODE -eq 0
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if (-not $builderExists) {
+        Write-Host (Get-Message -Key 'CreatingBuilder' -Values @($builderName))
+        Invoke-NativeCommand -Command 'docker' -Arguments @(
+            'buildx', 'create',
+            '--name', $builderName,
+            '--driver', 'docker-container',
+            '--bootstrap'
+        )
+    }
+
+    Write-Host (Get-Message -Key 'PreparingBuilder' -Values @($builderName))
+    $builderDetails = Get-NativeOutput -Command 'docker' -Arguments @('buildx', 'inspect', $builderName, '--bootstrap')
+    if ($builderDetails -notmatch '(?m)^Driver:\s+docker-container\s*$') {
+        throw (Get-Message -Key 'InvalidBuilderDriver' -Values @($builderName))
+    }
 
     if (-not (Test-DockerHubCredential)) {
         throw (Get-Message -Key 'DockerHubCredentialMissing')
@@ -283,6 +310,7 @@ try {
     $localImage = "new-api-local-verify:$shortSha"
     $commonBuildArguments = @(
         'buildx', 'build',
+        '--builder', $builderName,
         '--platform', $platform,
         '--label', "org.opencontainers.image.source=$sourceUrl",
         '--label', "org.opencontainers.image.revision=$commitSha",
