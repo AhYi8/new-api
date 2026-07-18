@@ -22,8 +22,9 @@ This is an AI API gateway/proxy built with Go. It aggregates 40+ upstream AI pro
 1. 执行 `git status --short --branch`，确认当前分支和工作区状态。
 2. 若存在未暂存改动，先确认改动范围及是否包含密钥、数据库、构建产物或本地工具文件，再按会话规则执行 `git add .`；只暂存，不得未经授权提交。
 3. 若工作区和暂存区均为空，在开始修改前拉取当前远程分支的最新提交。
-4. 同步官方代码、切换长期分支或执行变基前，工作区和暂存区必须为空；存在改动时应先完成当前工作或请求用户决定，禁止自动丢弃、覆盖或暂存到未知位置。
-5. 禁止未经授权执行 `git push`、`git rebase`、`git reset --hard`、`git checkout --`、强制更新分支或改写历史。
+4. 每次准备修改代码前，必须执行 `git fetch upstream --prune --tags` 并检查 `upstream/main` 是否有新提交；若有更新，必须先按下方官方代码同步流程拉取并合并，确认当前开发分支已包含最新 `upstream/main` 后才能开始修改代码。
+5. 同步官方代码、切换长期分支或执行变基前，工作区和暂存区必须为空；存在改动时应先完成当前工作或请求用户决定，禁止自动丢弃、覆盖或暂存到未知位置。
+6. 禁止未经授权执行 `git push`、`git rebase`、`git reset --hard`、`git checkout --`、强制更新分支或改写历史。
 
 ### 官方代码同步流程
 
