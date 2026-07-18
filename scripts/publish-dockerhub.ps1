@@ -1,6 +1,23 @@
+<#
+.SYNOPSIS
+从 personal 分支一键构建、验证并发布个人 Docker Hub 多架构镜像。
+
+.DESCRIPTION
+默认根据 upstream/main 最近的官方版本标签和 Docker Hub 现有个人版本，自动选择下一个
+personal-<官方版本>-rN 标签，同时更新 personal-latest。发布前要求工作区干净、当前提交
+已推送到 origin/personal，并且已经包含最新 upstream/main。
+
+.EXAMPLE
+.\scripts\publish-dockerhub.ps1
+
+.EXAMPLE
+.\scripts\publish-dockerhub.ps1 -PreflightOnly
+
+.EXAMPLE
+.\scripts\publish-dockerhub.ps1 -Version personal-v1.0.0-rc.21-r4
+#>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
     [ValidatePattern('^[a-z0-9_][a-z0-9_.-]{0,127}$')]
     [string]$Version,
 
@@ -19,6 +36,7 @@ Set-StrictMode -Version Latest
 
 $messagePath = Join-Path $PSScriptRoot 'publish-dockerhub.messages.zh-CN.json'
 $script:Messages = Get-Content -Raw -Encoding UTF8 -LiteralPath $messagePath | ConvertFrom-Json
+$script:HostProxyUri = $null
 
 function Get-Message {
     param(
@@ -65,6 +83,19 @@ function Get-NativeOutput {
     return ($output | Out-String).Trim()
 }
 
+function Get-BuildxBuilderNames {
+    $output = Get-NativeOutput -Command 'docker' -Arguments @('buildx', 'ls', '--format', '{{.Name}}')
+    if (-not $output) {
+        return @()
+    }
+
+    return @(
+        $output -split '\r?\n' |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ }
+    )
+}
+
 function Invoke-NativeCommandWithRetry {
     param(
         [Parameter(Mandatory = $true)]
@@ -104,6 +135,51 @@ function Invoke-NativeCommandWithRetry {
     }
 
     throw (Get-Message -Key 'NativeCommandFailed' -Values @($nativeExitCode, $Command, ($Arguments -join ' ')))
+}
+
+function Invoke-DockerHubRestMethod {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri
+    )
+
+    $parameters = @{
+        Method = 'Get'
+        Uri = $Uri
+        TimeoutSec = 30
+    }
+    if ($script:HostProxyUri) {
+        $parameters.Proxy = $script:HostProxyUri
+    }
+
+    return Invoke-RestMethod @parameters
+}
+
+function Invoke-DockerHubWebRequest {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+
+        [Parameter()]
+        [hashtable]$Headers = @{},
+
+        [Parameter()]
+        [ValidateSet('Get', 'Head')]
+        [string]$Method = 'Get'
+    )
+
+    $parameters = @{
+        UseBasicParsing = $true
+        Method = $Method
+        Uri = $Uri
+        Headers = $Headers
+        TimeoutSec = 30
+    }
+    if ($script:HostProxyUri) {
+        $parameters.Proxy = $script:HostProxyUri
+    }
+
+    return Invoke-WebRequest @parameters
 }
 
 function Test-DockerHubCredential {
@@ -152,7 +228,7 @@ function Get-AnonymousDockerHubToken {
     )
 
     $tokenUri = "https://auth.docker.io/token?service=registry.docker.io&scope=repository:$ImagePath`:pull"
-    $tokenResponse = Invoke-RestMethod -Method Get -Uri $tokenUri -TimeoutSec 30
+    $tokenResponse = Invoke-DockerHubRestMethod -Uri $tokenUri
     if (-not $tokenResponse.token) {
         throw (Get-Message -Key 'AnonymousTokenMissing')
     }
@@ -176,7 +252,7 @@ function Test-PublicDockerManifest {
     }
 
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Method Head -Uri "https://registry-1.docker.io/v2/$ImagePath/manifests/$Tag" -Headers $headers -TimeoutSec 30
+        $response = Invoke-DockerHubWebRequest -Method Head -Uri "https://registry-1.docker.io/v2/$ImagePath/manifests/$Tag" -Headers $headers
         return $response.StatusCode -eq 200
     }
     catch {
@@ -188,15 +264,207 @@ function Test-PublicDockerManifest {
     }
 }
 
+function Test-DockerHubNetwork {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ImagePath
+    )
+
+    try {
+        $token = Get-AnonymousDockerHubToken -ImagePath $ImagePath
+        $headers = @{ Authorization = "Bearer $token" }
+        $response = Invoke-DockerHubWebRequest -Uri 'https://registry-1.docker.io/v2/' -Headers $headers
+        return $response.StatusCode -eq 200
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-PublicIPv4Address {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$HostName
+    )
+
+    $headers = @{ Accept = 'application/dns-json' }
+    $response = Invoke-RestMethod -Method Get -Uri "https://cloudflare-dns.com/dns-query?name=$HostName&type=A" -Headers $headers -TimeoutSec 30
+    foreach ($answer in @($response.Answer)) {
+        if ($answer.type -ne 1) {
+            continue
+        }
+
+        $address = $null
+        if ([System.Net.IPAddress]::TryParse([string]$answer.data, [ref]$address) -and $address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+            return $address.IPAddressToString
+        }
+    }
+
+    throw (Get-Message -Key 'PublicDnsLookupFailed' -Values @($HostName))
+}
+
+function Get-OfficialVersion {
+    $officialVersion = Get-NativeOutput -Command 'git' -Arguments @('describe', '--tags', '--abbrev=0', '--match', 'v*', 'upstream/main')
+    if ($officialVersion -notmatch '^v[0-9A-Za-z][0-9A-Za-z._-]*$') {
+        throw (Get-Message -Key 'OfficialVersionInvalid' -Values @($officialVersion))
+    }
+
+    return $officialVersion
+}
+
+function Get-NextPersonalVersion {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ImagePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OfficialVersion
+    )
+
+    $prefix = "personal-$OfficialVersion-r"
+    $escapedPrefix = [Uri]::EscapeDataString($prefix)
+    $nextUri = "https://hub.docker.com/v2/repositories/$ImagePath/tags?page_size=100&name=$escapedPrefix"
+    $highestRevision = 0
+    $versionPattern = '^' + [Regex]::Escape($prefix) + '(\d+)$'
+
+    while ($nextUri) {
+        $response = Invoke-DockerHubRestMethod -Uri $nextUri
+        foreach ($tag in @($response.results)) {
+            if ($tag.name -match $versionPattern) {
+                $revision = 0
+                if (-not [int]::TryParse($Matches[1], [ref]$revision)) {
+                    continue
+                }
+                if ($revision -gt $highestRevision) {
+                    $highestRevision = $revision
+                }
+            }
+        }
+        $nextUri = $response.next
+    }
+
+    return "$prefix$($highestRevision + 1)"
+}
+
+function Get-DockerHubTagInfo {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ImagePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Tag
+    )
+
+    $escapedTag = [Uri]::EscapeDataString($Tag)
+    return Invoke-DockerHubRestMethod -Uri "https://hub.docker.com/v2/repositories/$ImagePath/tags/$escapedTag"
+}
+
+function Get-DockerHubTagInfoWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ImagePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Tag,
+
+        [Parameter()]
+        [int]$Attempts = 10
+    )
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            return Get-DockerHubTagInfo -ImagePath $ImagePath -Tag $Tag
+        }
+        catch {
+            $lastError = $_.Exception.Message
+            if ($attempt -lt $Attempts) {
+                Start-Sleep -Seconds 3
+            }
+        }
+    }
+
+    throw (Get-Message -Key 'DockerHubTagQueryFailed' -Values @($Tag, $lastError))
+}
+
+function Invoke-ImageSmokeTest {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Image,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContainerName
+    )
+
+    $containerId = $null
+    try {
+        $containerId = Get-NativeOutput -Command 'docker' -Arguments @(
+            'run', '--detach', '--platform', 'linux/amd64',
+            '--name', $ContainerName,
+            '--publish', '127.0.0.1::3000',
+            $Image
+        )
+        if (-not $containerId) {
+            throw (Get-Message -Key 'SmokeContainerStartFailed')
+        }
+
+        $portOutput = Get-NativeOutput -Command 'docker' -Arguments @('port', $ContainerName, '3000/tcp')
+        if ($portOutput -notmatch ':(\d+)\s*$') {
+            throw (Get-Message -Key 'SmokePortParseFailed' -Values @($portOutput))
+        }
+        $statusUri = "http://127.0.0.1:$($Matches[1])/api/status"
+
+        $lastSmokeError = $null
+        for ($attempt = 1; $attempt -le 60; $attempt++) {
+            try {
+                $response = Invoke-WebRequest -UseBasicParsing -Uri $statusUri -TimeoutSec 5
+                if ($response.StatusCode -eq 200) {
+                    Write-Host (Get-Message -Key 'SmokePassed' -Values @($statusUri))
+                    return
+                }
+            }
+            catch {
+                $lastSmokeError = $_.Exception.Message
+            }
+            Start-Sleep -Seconds 2
+        }
+
+        Write-Host (Get-Message -Key 'SmokeLogs')
+        & docker logs --tail 200 $ContainerName
+        throw (Get-Message -Key 'SmokeTimeout' -Values @($statusUri, $lastSmokeError))
+    }
+    finally {
+        if ($containerId) {
+            $previousErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = 'SilentlyContinue'
+            try {
+                & docker rm --force $ContainerName *> $null
+            }
+            finally {
+                $ErrorActionPreference = $previousErrorActionPreference
+            }
+        }
+    }
+}
+
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $imagePath = "ahyi/$Repository"
-$versionImage = "${imagePath}:$Version"
 $latestImage = "${imagePath}:personal-latest"
-$platform = 'linux/amd64'
-$builderName = 'new-api-publisher'
+$localPlatform = 'linux/amd64'
+$publishPlatforms = 'linux/amd64,linux/arm64'
+$directBuilderName = 'new-api-publisher'
+$proxyBuilderName = 'new-api-dockerhub-publisher-proxy'
+$proxyContainerName = 'new-api-dockerhub-release-proxy'
+$proxyNetworkName = 'new-api-dockerhub-release-net'
+$proxyNetworkAlias = 'release-proxy'
+$proxyImage = 'vimagick/tinyproxy@sha256:72b441b95ee1e641af948f68f09492f9f795ead72b73954414e339168c98ad8c'
+$builderName = $directBuilderName
 $temporaryRoot = $null
-$smokeContainer = $null
 $localImage = $null
+$remoteImageLoaded = $false
+$proxyStarted = $false
+$originalHttpProxy = $env:HTTP_PROXY
+$originalHttpsProxy = $env:HTTPS_PROXY
 
 Push-Location $repositoryRoot
 try {
@@ -218,50 +486,29 @@ try {
         throw (Get-Message -Key 'DirtyWorktree')
     }
 
-    $upstreamBranch = Get-NativeOutput -Command 'git' -Arguments @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}')
-    Invoke-NativeCommand -Command 'git' -Arguments @('fetch', '--quiet')
+    Invoke-NativeCommand -Command 'git' -Arguments @('fetch', 'origin', 'personal', '--prune')
+    Invoke-NativeCommand -Command 'git' -Arguments @('fetch', 'upstream', '--prune', '--tags')
 
-    $trackingCounts = Get-NativeOutput -Command 'git' -Arguments @('rev-list', '--left-right', '--count', "$upstreamBranch...HEAD")
+    $trackingCounts = Get-NativeOutput -Command 'git' -Arguments @('rev-list', '--left-right', '--count', 'origin/personal...HEAD')
     $countParts = $trackingCounts -split '\s+'
     if ($countParts.Count -ne 2 -or $countParts[0] -ne '0' -or $countParts[1] -ne '0') {
-        throw (Get-Message -Key 'TrackingMismatch' -Values @($upstreamBranch, $countParts[0], $countParts[1]))
+        throw (Get-Message -Key 'TrackingMismatch' -Values @('origin/personal', $countParts[0], $countParts[1]))
+    }
+
+    $upstreamBehindCount = Get-NativeOutput -Command 'git' -Arguments @('rev-list', '--count', 'HEAD..upstream/main')
+    if ($upstreamBehindCount -ne '0') {
+        throw (Get-Message -Key 'UpstreamNotMerged' -Values @($upstreamBehindCount))
     }
 
     Invoke-NativeCommand -Command 'docker' -Arguments @('version')
     Invoke-NativeCommand -Command 'docker' -Arguments @('buildx', 'version')
-
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        & docker buildx inspect $builderName *> $null
-        $builderExists = $LASTEXITCODE -eq 0
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-
-    if (-not $builderExists) {
-        Write-Host (Get-Message -Key 'CreatingBuilder' -Values @($builderName))
-        Invoke-NativeCommand -Command 'docker' -Arguments @(
-            'buildx', 'create',
-            '--name', $builderName,
-            '--driver', 'docker-container',
-            '--bootstrap'
-        )
-    }
-
-    Write-Host (Get-Message -Key 'PreparingBuilder' -Values @($builderName))
-    $builderDetails = Get-NativeOutput -Command 'docker' -Arguments @('buildx', 'inspect', $builderName, '--bootstrap')
-    if ($builderDetails -notmatch '(?m)^Driver:\s+docker-container\s*$') {
-        throw (Get-Message -Key 'InvalidBuilderDriver' -Values @($builderName))
-    }
 
     if (-not (Test-DockerHubCredential)) {
         throw (Get-Message -Key 'DockerHubCredentialMissing')
     }
 
     try {
-        $repositoryInfo = Invoke-RestMethod -Method Get -Uri "https://hub.docker.com/v2/repositories/$imagePath/" -TimeoutSec 30
+        $repositoryInfo = Invoke-DockerHubRestMethod -Uri "https://hub.docker.com/v2/repositories/$imagePath/"
     }
     catch {
         throw (Get-Message -Key 'PublicRepositoryUnavailable' -Values @($imagePath, $_.Exception.Message))
@@ -271,12 +518,116 @@ try {
         throw (Get-Message -Key 'RepositoryIsPrivate' -Values @($imagePath))
     }
 
+    if (-not (Test-DockerHubNetwork -ImagePath $imagePath)) {
+        Write-Host (Get-Message -Key 'DockerHubNetworkFallback')
+        $authAddress = Get-PublicIPv4Address -HostName 'auth.docker.io'
+        $registryAddress = Get-PublicIPv4Address -HostName 'registry-1.docker.io'
+        $cdnAddress = Get-PublicIPv4Address -HostName 'production.cloudflare.docker.com'
+
+        $existingProxy = Get-NativeOutput -Command 'docker' -Arguments @('ps', '--all', '--quiet', '--filter', "name=^/$proxyContainerName$")
+        if ($existingProxy) {
+            $existingLabel = Get-NativeOutput -Command 'docker' -Arguments @('inspect', '--format', '{{index .Config.Labels "com.ahyi.new-api.release-proxy"}}', $proxyContainerName)
+            if ($existingLabel -ne 'true') {
+                throw (Get-Message -Key 'ProxyContainerConflict' -Values @($proxyContainerName))
+            }
+            Invoke-NativeCommand -Command 'docker' -Arguments @('rm', '--force', $proxyContainerName)
+        }
+
+        $existingNetwork = Get-NativeOutput -Command 'docker' -Arguments @('network', 'ls', '--quiet', '--filter', "name=^$proxyNetworkName$")
+        if (-not $existingNetwork) {
+            Invoke-NativeCommand -Command 'docker' -Arguments @('network', 'create', '--label', 'com.ahyi.new-api.release-proxy=true', $proxyNetworkName)
+        }
+        else {
+            $networkLabel = Get-NativeOutput -Command 'docker' -Arguments @('network', 'inspect', '--format', '{{index .Labels "com.ahyi.new-api.release-proxy"}}', $proxyNetworkName)
+            if ($networkLabel -ne 'true') {
+                throw (Get-Message -Key 'ProxyNetworkConflict' -Values @($proxyNetworkName))
+            }
+        }
+
+        Invoke-NativeCommandWithRetry -Command 'docker' -Arguments @('pull', $proxyImage)
+        Invoke-NativeCommand -Command 'docker' -Arguments @(
+            'run', '--detach', '--name', $proxyContainerName,
+            '--label', 'com.ahyi.new-api.release-proxy=true',
+            '--network', $proxyNetworkName,
+            '--network-alias', $proxyNetworkAlias,
+            '--publish', '127.0.0.1::8888',
+            '--add-host', "auth.docker.io:$authAddress",
+            '--add-host', "registry-1.docker.io:$registryAddress",
+            '--add-host', "production.cloudflare.docker.com:$cdnAddress",
+            $proxyImage
+        )
+        $proxyStarted = $true
+
+        $proxyPortOutput = Get-NativeOutput -Command 'docker' -Arguments @('port', $proxyContainerName, '8888/tcp')
+        if ($proxyPortOutput -notmatch ':(\d+)\s*$') {
+            throw (Get-Message -Key 'ProxyPortParseFailed' -Values @($proxyPortOutput))
+        }
+        $script:HostProxyUri = "http://127.0.0.1:$($Matches[1])"
+        $env:HTTP_PROXY = $script:HostProxyUri
+        $env:HTTPS_PROXY = $script:HostProxyUri
+
+        if (-not (Test-DockerHubNetwork -ImagePath $imagePath)) {
+            throw (Get-Message -Key 'ProxyConnectivityFailed')
+        }
+
+        $builderName = $proxyBuilderName
+        $existingBuilder = @(Get-BuildxBuilderNames)
+        if ($existingBuilder -contains $builderName) {
+            Invoke-NativeCommand -Command 'docker' -Arguments @('buildx', 'inspect', $builderName, '--bootstrap')
+            $builderContainerName = "buildx_buildkit_$($builderName)0"
+            $builderEnvironment = Get-NativeOutput -Command 'docker' -Arguments @('inspect', '--format', '{{json .Config.Env}}', $builderContainerName)
+            $builderNetworks = Get-NativeOutput -Command 'docker' -Arguments @('inspect', '--format', '{{json .NetworkSettings.Networks}}', $builderContainerName)
+            if ($builderEnvironment -notmatch [Regex]::Escape("HTTPS_PROXY=http://${proxyNetworkAlias}:8888") -or $builderNetworks -notmatch [Regex]::Escape($proxyNetworkName)) {
+                Write-Host (Get-Message -Key 'RecreatingProxyBuilder' -Values @($builderName))
+                Invoke-NativeCommand -Command 'docker' -Arguments @('buildx', 'rm', $builderName)
+                $existingBuilder = @()
+            }
+        }
+
+        if ($existingBuilder -notcontains $builderName) {
+            Write-Host (Get-Message -Key 'CreatingBuilder' -Values @($builderName))
+            Invoke-NativeCommand -Command 'docker' -Arguments @(
+                'buildx', 'create', '--name', $builderName,
+                '--driver', 'docker-container',
+                '--driver-opt', "network=$proxyNetworkName",
+                '--driver-opt', "env.HTTP_PROXY=http://${proxyNetworkAlias}:8888",
+                '--driver-opt', "env.HTTPS_PROXY=http://${proxyNetworkAlias}:8888",
+                '--bootstrap'
+            )
+        }
+    }
+    else {
+        $existingBuilder = @(Get-BuildxBuilderNames)
+        if ($existingBuilder -notcontains $builderName) {
+            Write-Host (Get-Message -Key 'CreatingBuilder' -Values @($builderName))
+            Invoke-NativeCommand -Command 'docker' -Arguments @(
+                'buildx', 'create', '--name', $builderName,
+                '--driver', 'docker-container',
+                '--bootstrap'
+            )
+        }
+    }
+
+    Write-Host (Get-Message -Key 'PreparingBuilder' -Values @($builderName))
+    $builderDetails = Get-NativeOutput -Command 'docker' -Arguments @('buildx', 'inspect', $builderName, '--bootstrap')
+    if ($builderDetails -notmatch '(?m)^Driver:\s+docker-container\s*$') {
+        throw (Get-Message -Key 'InvalidBuilderDriver' -Values @($builderName))
+    }
+
+    $officialVersion = Get-OfficialVersion
+    if (-not $Version) {
+        $Version = Get-NextPersonalVersion -ImagePath $imagePath -OfficialVersion $officialVersion
+        Write-Host (Get-Message -Key 'AutoVersionSelected' -Values @($Version))
+    }
+    $versionImage = "${imagePath}:$Version"
+
     if ((Test-PublicDockerManifest -ImagePath $imagePath -Tag $Version) -and -not $ForceVersionOverwrite) {
         throw (Get-Message -Key 'VersionAlreadyExists' -Values @($versionImage))
     }
 
     $commitSha = Get-NativeOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')
     $shortSha = Get-NativeOutput -Command 'git' -Arguments @('rev-parse', '--short=12', 'HEAD')
+    $upstreamRevision = Get-NativeOutput -Command 'git' -Arguments @('rev-parse', 'upstream/main')
     $originUrl = Get-NativeOutput -Command 'git' -Arguments @('config', '--get', 'remote.origin.url')
     if ($originUrl -match '^git@github\.com:(.+)$') {
         $sourceUrl = "https://github.com/$($Matches[1])"
@@ -286,12 +637,13 @@ try {
     }
     $sourceUrl = $sourceUrl -replace '\.git$', ''
 
+    Write-Host (Get-Message -Key 'OfficialBaseline' -Values @($officialVersion, $upstreamRevision))
     Write-Host (Get-Message -Key 'SourceCommit' -Values @($commitSha))
     Write-Host (Get-Message -Key 'TargetImage' -Values @($versionImage))
     if (-not $SkipLatest) {
         Write-Host (Get-Message -Key 'RollingTag' -Values @($latestImage))
     }
-    Write-Host (Get-Message -Key 'TargetPlatform' -Values @($platform))
+    Write-Host (Get-Message -Key 'TargetPlatform' -Values @($publishPlatforms))
 
     if ($PreflightOnly) {
         Write-Host (Get-Message -Key 'PreflightPassed')
@@ -306,15 +658,19 @@ try {
     Invoke-NativeCommand -Command 'git' -Arguments @('archive', '--format=tar', '--output', $archivePath, 'HEAD')
     Invoke-NativeCommand -Command 'tar' -Arguments @('-xf', $archivePath, '-C', $buildContext)
     [System.IO.File]::WriteAllText((Join-Path $buildContext 'VERSION'), "$Version`n", (New-Object System.Text.UTF8Encoding($false)))
+    $verificationDockerfile = Join-Path $buildContext 'Dockerfile.verify'
+    $dockerfileContent = [System.IO.File]::ReadAllText((Join-Path $buildContext 'Dockerfile'))
+    $verificationStage = "`nFROM builder2 AS test-runner`nRUN go test ./...`n"
+    [System.IO.File]::WriteAllText($verificationDockerfile, $dockerfileContent + $verificationStage, (New-Object System.Text.UTF8Encoding($false)))
 
     $localImage = "new-api-local-verify:$shortSha"
     $commonBuildArguments = @(
         'buildx', 'build',
         '--builder', $builderName,
-        '--platform', $platform,
         '--label', "org.opencontainers.image.source=$sourceUrl",
         '--label', "org.opencontainers.image.revision=$commitSha",
         '--label', "org.opencontainers.image.version=$Version",
+        '--label', "io.new-api.upstream-revision=$upstreamRevision",
         '--label', 'org.opencontainers.image.licenses=AGPL-3.0-only'
     )
 
@@ -325,58 +681,35 @@ try {
             Sort-Object -Unique
     )
     foreach ($baseImage in $baseImages) {
-        Write-Host (Get-Message -Key 'PullingBaseImage' -Values @($baseImage))
-        Invoke-NativeCommandWithRetry -Command 'docker' -Arguments @('pull', '--platform', $platform, $baseImage)
+        foreach ($targetPlatform in @('linux/amd64', 'linux/arm64')) {
+            Write-Host (Get-Message -Key 'PullingBaseImage' -Values @($baseImage, $targetPlatform))
+            Invoke-NativeCommandWithRetry -Command 'docker' -Arguments @('pull', '--platform', $targetPlatform, $baseImage)
+        }
     }
+
+    Write-Host (Get-Message -Key 'RunningAutomatedTests')
+    Invoke-NativeCommandWithRetry -Command 'docker' -Arguments ($commonBuildArguments + @(
+        '--file', $verificationDockerfile,
+        '--target', 'test-runner',
+        '--platform', $localPlatform,
+        '--output', 'type=cacheonly',
+        $buildContext
+    ))
 
     Write-Host (Get-Message -Key 'BuildingLocalImage')
-    Invoke-NativeCommandWithRetry -Command 'docker' -Arguments ($commonBuildArguments + @('--tag', $localImage, '--load', $buildContext))
+    Invoke-NativeCommandWithRetry -Command 'docker' -Arguments ($commonBuildArguments + @(
+        '--platform', $localPlatform,
+        '--tag', $localImage,
+        '--load',
+        $buildContext
+    ))
 
     Write-Host (Get-Message -Key 'RunningSmokeTest')
-    $smokeContainer = "new-api-smoke-$($shortSha.Substring(0, 8))"
-    $containerId = Get-NativeOutput -Command 'docker' -Arguments @(
-        'run', '--detach', '--name', $smokeContainer,
-        '--publish', '127.0.0.1::3000',
-        $localImage
-    )
-    if (-not $containerId) {
-        throw (Get-Message -Key 'SmokeContainerStartFailed')
-    }
-
-    $portOutput = Get-NativeOutput -Command 'docker' -Arguments @('port', $smokeContainer, '3000/tcp')
-    if ($portOutput -notmatch ':(\d+)\s*$') {
-        throw (Get-Message -Key 'SmokePortParseFailed' -Values @($portOutput))
-    }
-    $statusUri = "http://127.0.0.1:$($Matches[1])/api/status"
-
-    $smokeSucceeded = $false
-    $lastSmokeError = $null
-    for ($attempt = 1; $attempt -le 30; $attempt++) {
-        try {
-            $response = Invoke-WebRequest -UseBasicParsing -Uri $statusUri -TimeoutSec 5
-            if ($response.StatusCode -eq 200) {
-                $smokeSucceeded = $true
-                break
-            }
-        }
-        catch {
-            $lastSmokeError = $_.Exception.Message
-        }
-        Start-Sleep -Seconds 2
-    }
-
-    if (-not $smokeSucceeded) {
-        Write-Host (Get-Message -Key 'SmokeLogs')
-        & docker logs --tail 200 $smokeContainer
-        throw (Get-Message -Key 'SmokeTimeout' -Values @($statusUri, $lastSmokeError))
-    }
-    Write-Host (Get-Message -Key 'SmokePassed' -Values @($statusUri))
-
-    Invoke-NativeCommand -Command 'docker' -Arguments @('rm', '--force', $smokeContainer)
-    $smokeContainer = $null
+    Invoke-ImageSmokeTest -Image $localImage -ContainerName "new-api-smoke-local-$($shortSha.Substring(0, 8))"
 
     Write-Host (Get-Message -Key 'PublishingImage')
     $publishArguments = $commonBuildArguments + @(
+        '--platform', $publishPlatforms,
         '--tag', $versionImage,
         '--provenance=mode=max',
         '--sbom=true',
@@ -393,33 +726,86 @@ try {
         throw (Get-Message -Key 'AnonymousPullFailed' -Values @($versionImage))
     }
 
+    $versionInfo = Get-DockerHubTagInfoWithRetry -ImagePath $imagePath -Tag $Version
+    $publishedPlatforms = @(
+        $versionInfo.images |
+            Where-Object { $_.architecture -ne 'unknown' } |
+            ForEach-Object { "$($_.os)/$($_.architecture)" }
+    )
+    foreach ($requiredPlatform in @('linux/amd64', 'linux/arm64')) {
+        if ($publishedPlatforms -notcontains $requiredPlatform) {
+            throw (Get-Message -Key 'PublishedPlatformMissing' -Values @($requiredPlatform, ($publishedPlatforms -join ', ')))
+        }
+    }
+
+    if (-not $SkipLatest) {
+        $latestInfo = Get-DockerHubTagInfoWithRetry -ImagePath $imagePath -Tag 'personal-latest'
+        if ($latestInfo.digest -ne $versionInfo.digest) {
+            throw (Get-Message -Key 'RollingDigestMismatch' -Values @($versionInfo.digest, $latestInfo.digest))
+        }
+    }
+
+    Write-Host (Get-Message -Key 'RunningRemoteSmokeTest')
+    Invoke-NativeCommandWithRetry -Command 'docker' -Arguments @('pull', '--platform', $localPlatform, $versionImage)
+    $remoteImageLoaded = $true
+    Invoke-ImageSmokeTest -Image $versionImage -ContainerName "new-api-smoke-remote-$($shortSha.Substring(0, 8))"
+
+    $remoteLabelsJson = Get-NativeOutput -Command 'docker' -Arguments @('image', 'inspect', '--format', '{{json .Config.Labels}}', $versionImage)
+    $remoteLabels = $remoteLabelsJson | ConvertFrom-Json
+    if ($remoteLabels.'org.opencontainers.image.revision' -ne $commitSha -or $remoteLabels.'io.new-api.upstream-revision' -ne $upstreamRevision) {
+        throw (Get-Message -Key 'PublishedLabelMismatch')
+    }
+
     Write-Host ''
     Write-Host (Get-Message -Key 'PublishCompleted')
     Write-Host (Get-Message -Key 'PublicImage' -Values @("docker.io/$versionImage"))
+    Write-Host (Get-Message -Key 'ManifestDigest' -Values @($versionInfo.digest))
     Write-Host (Get-Message -Key 'SourceCommit' -Values @($commitSha))
-    Write-Host (Get-Message -Key 'TargetPlatform' -Values @($platform))
+    Write-Host (Get-Message -Key 'TargetPlatform' -Values @(($publishedPlatforms -join ', ')))
 }
 finally {
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'SilentlyContinue'
     try {
-        if ($smokeContainer) {
-            & docker container inspect $smokeContainer *> $null
-            if ($LASTEXITCODE -eq 0) {
-                & docker rm --force $smokeContainer *> $null
-            }
-        }
         if ($localImage) {
             & docker image inspect $localImage *> $null
             if ($LASTEXITCODE -eq 0) {
                 & docker image rm --force $localImage *> $null
             }
         }
+        if ($remoteImageLoaded -and $Version) {
+            $publishedImage = "${imagePath}:$Version"
+            & docker image inspect $publishedImage *> $null
+            if ($LASTEXITCODE -eq 0) {
+                & docker image rm $publishedImage *> $null
+            }
+        }
         if ($temporaryRoot -and (Test-Path -LiteralPath $temporaryRoot)) {
-            Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
+            $resolvedTemporaryRoot = [System.IO.Path]::GetFullPath($temporaryRoot)
+            $resolvedSystemTemp = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+            $expectedPrefix = $resolvedSystemTemp + [System.IO.Path]::DirectorySeparatorChar + 'new-api-docker-'
+            if ($resolvedTemporaryRoot.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                Remove-Item -LiteralPath $resolvedTemporaryRoot -Recurse -Force
+            }
+        }
+        if ($proxyStarted) {
+            & docker rm --force $proxyContainerName *> $null
         }
     }
     finally {
+        if ($null -eq $originalHttpProxy) {
+            Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:HTTP_PROXY = $originalHttpProxy
+        }
+        if ($null -eq $originalHttpsProxy) {
+            Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:HTTPS_PROXY = $originalHttpsProxy
+        }
+        $script:HostProxyUri = $null
         $ErrorActionPreference = $previousErrorActionPreference
         Pop-Location
     }
