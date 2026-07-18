@@ -65,6 +65,47 @@ function Get-NativeOutput {
     return ($output | Out-String).Trim()
 }
 
+function Invoke-NativeCommandWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Command,
+
+        [Parameter()]
+        [string[]]$Arguments = @(),
+
+        [Parameter()]
+        [int]$Attempts = 3,
+
+        [Parameter()]
+        [int]$DelaySeconds = 5
+    )
+
+    $lastExitCode = 0
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $Command @Arguments
+            $lastExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+
+        if ($lastExitCode -eq 0) {
+            return
+        }
+
+        if ($attempt -lt $Attempts) {
+            $delay = $DelaySeconds * $attempt
+            Write-Host (Get-Message -Key 'RetryingCommand' -Values @($delay, ($attempt + 1), $Attempts, $Command, ($Arguments -join ' ')))
+            Start-Sleep -Seconds $delay
+        }
+    }
+
+    throw (Get-Message -Key 'NativeCommandFailed' -Values @($lastExitCode, $Command, ($Arguments -join ' ')))
+}
+
 function Test-DockerHubCredential {
     $dockerConfigPath = Join-Path $HOME '.docker\config.json'
     if (-not (Test-Path -LiteralPath $dockerConfigPath)) {
@@ -249,8 +290,19 @@ try {
         '--label', 'org.opencontainers.image.licenses=AGPL-3.0-only'
     )
 
+    $baseImages = @(
+        Get-Content -LiteralPath (Join-Path $buildContext 'Dockerfile') |
+            Where-Object { $_ -match '^FROM\s+' } |
+            ForEach-Object { ($_ -split '\s+')[1] } |
+            Sort-Object -Unique
+    )
+    foreach ($baseImage in $baseImages) {
+        Write-Host (Get-Message -Key 'PullingBaseImage' -Values @($baseImage))
+        Invoke-NativeCommandWithRetry -Command 'docker' -Arguments @('pull', '--platform', $platform, $baseImage)
+    }
+
     Write-Host (Get-Message -Key 'BuildingLocalImage')
-    Invoke-NativeCommand -Command 'docker' -Arguments ($commonBuildArguments + @('--tag', $localImage, '--load', $buildContext))
+    Invoke-NativeCommandWithRetry -Command 'docker' -Arguments ($commonBuildArguments + @('--tag', $localImage, '--load', $buildContext))
 
     Write-Host (Get-Message -Key 'RunningSmokeTest')
     $smokeContainer = "new-api-smoke-$($shortSha.Substring(0, 8))"
@@ -306,9 +358,9 @@ try {
         $publishArguments += @('--tag', $latestImage)
     }
     $publishArguments += $buildContext
-    Invoke-NativeCommand -Command 'docker' -Arguments $publishArguments
+    Invoke-NativeCommandWithRetry -Command 'docker' -Arguments $publishArguments
 
-    Invoke-NativeCommand -Command 'docker' -Arguments @('buildx', 'imagetools', 'inspect', $versionImage)
+    Invoke-NativeCommandWithRetry -Command 'docker' -Arguments @('buildx', 'imagetools', 'inspect', $versionImage)
     if (-not (Test-PublicDockerManifest -ImagePath $imagePath -Tag $Version)) {
         throw (Get-Message -Key 'AnonymousPullFailed' -Values @($versionImage))
     }
@@ -320,14 +372,27 @@ try {
     Write-Host (Get-Message -Key 'TargetPlatform' -Values @($platform))
 }
 finally {
-    if ($smokeContainer) {
-        & docker rm --force $smokeContainer 2>$null | Out-Null
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        if ($smokeContainer) {
+            & docker container inspect $smokeContainer *> $null
+            if ($LASTEXITCODE -eq 0) {
+                & docker rm --force $smokeContainer *> $null
+            }
+        }
+        if ($localImage) {
+            & docker image inspect $localImage *> $null
+            if ($LASTEXITCODE -eq 0) {
+                & docker image rm --force $localImage *> $null
+            }
+        }
+        if ($temporaryRoot -and (Test-Path -LiteralPath $temporaryRoot)) {
+            Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
+        }
     }
-    if ($localImage) {
-        & docker image rm --force $localImage 2>$null | Out-Null
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
     }
-    if ($temporaryRoot -and (Test-Path -LiteralPath $temporaryRoot)) {
-        Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
-    }
-    Pop-Location
 }

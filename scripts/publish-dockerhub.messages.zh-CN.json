@@ -1,5 +1,7 @@
 {
   "NativeCommandFailed": "命令执行失败（退出码 {0}）：{1} {2}",
+  "RetryingCommand": "命令失败，{0} 秒后进行第 {1}/{2} 次重试：{3} {4}",
+  "PullingBaseImage": "正在预拉取基础镜像：{0}",
   "AnonymousTokenMissing": "Docker Hub 未返回匿名拉取令牌。",
   "RunningPreflight": "正在执行发布前检查...",
   "RequiredCommandMissing": "未找到必需命令：{0}",
