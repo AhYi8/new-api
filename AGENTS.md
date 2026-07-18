@@ -81,6 +81,9 @@ git push --force-with-lease origin personal
 
 ### 个人镜像构建与发布
 
+- 本地发布个人 Docker Hub 镜像必须统一执行 `.\scripts\publish-dockerhub.ps1`，默认不传参数，由脚本自动选择下一个不可变版本并同步更新 `personal-latest`；禁止再手工拼装 `docker buildx build`、逐架构推送或清单合并命令替代该脚本。
+- 正式发布前可执行 `.\scripts\publish-dockerhub.ps1 -PreflightOnly` 仅做前置检查；确需指定版本时使用 `-Version <标签>`。脚本或发布环境失败时应修复根因后重新运行脚本，不得绕过其分支、工作区、上游基线、测试、双架构、远程清单或冒烟验证。
+- 发布脚本及其相关改动必须先提交并推送到 `origin/personal`，再执行正式发布。用户后续要求“发布镜像”时，默认含义即为按本节调用该脚本完成发布和验证。
 - 镜像只能从已验证且工作区干净的 `personal` 提交或其发布标签构建，禁止从 `main` 或带未提交改动的工作区发布。
 - 镜像发布到个人命名空间，例如 `ghcr.io/AhYi8/new-api`；禁止覆盖或冒充官方 `calciumion/new-api` 镜像。
 - 生产环境必须使用不可变版本标签或镜像摘要，例如 `personal-v1.0.0-rc.21-r1`；可额外维护 `personal-latest` 供人工测试，但不得将其作为唯一生产回滚依据。
