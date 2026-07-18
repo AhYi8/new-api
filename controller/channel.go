@@ -68,13 +68,17 @@ func clearChannelInfo(channel *model.Channel) {
 	if channel.ChannelInfo.IsMultiKey {
 		channel.ChannelInfo.MultiKeyDisabledReason = nil
 		channel.ChannelInfo.MultiKeyDisabledTime = nil
+		channel.ChannelInfo.MultiKeyDisabledStatusCode = nil
+		channel.ChannelInfo.MultiKeyDisabledGeneration = nil
 	}
 }
 
 type multiKeyStateSnapshot struct {
-	status         int
-	disabledReason string
-	disabledTime   int64
+	status             int
+	disabledReason     string
+	disabledTime       int64
+	disabledStatusCode int
+	disabledGeneration int64
 }
 
 func splitMultiKeyValues(raw string) []string {
@@ -122,6 +126,8 @@ func rebuildMultiKeyStatus(originInfo model.ChannelInfo, originKey string, updat
 		originInfo.MultiKeyStatusList = nil
 		originInfo.MultiKeyDisabledReason = nil
 		originInfo.MultiKeyDisabledTime = nil
+		originInfo.MultiKeyDisabledStatusCode = nil
+		originInfo.MultiKeyDisabledGeneration = nil
 		originInfo.MultiKeyPollingIndex = 0
 		originInfo.MultiKeyTestIndex = 0
 		return originInfo
@@ -132,6 +138,8 @@ func rebuildMultiKeyStatus(originInfo model.ChannelInfo, originKey string, updat
 		originInfo.MultiKeyStatusList = nil
 		originInfo.MultiKeyDisabledReason = nil
 		originInfo.MultiKeyDisabledTime = nil
+		originInfo.MultiKeyDisabledStatusCode = nil
+		originInfo.MultiKeyDisabledGeneration = nil
 		originInfo.MultiKeyPollingIndex = 0
 		originInfo.MultiKeyTestIndex = 0
 		return originInfo
@@ -155,6 +163,16 @@ func rebuildMultiKeyStatus(originInfo model.ChannelInfo, originKey string, updat
 				snapshots[i].disabledTime = disabledTime
 			}
 		}
+		if originInfo.MultiKeyDisabledStatusCode != nil {
+			if statusCode, exists := originInfo.MultiKeyDisabledStatusCode[i]; exists {
+				snapshots[i].disabledStatusCode = statusCode
+			}
+		}
+		if originInfo.MultiKeyDisabledGeneration != nil {
+			if generation, exists := originInfo.MultiKeyDisabledGeneration[i]; exists {
+				snapshots[i].disabledGeneration = generation
+			}
+		}
 		originKeys[i] = normalizeMultiKeyValue(key)
 	}
 
@@ -166,6 +184,8 @@ func rebuildMultiKeyStatus(originInfo model.ChannelInfo, originKey string, updat
 	nextStatusList := make(map[int]int, len(updatedKeys))
 	nextDisabledReason := make(map[int]string, len(updatedKeys))
 	nextDisabledTime := make(map[int]int64, len(updatedKeys))
+	nextDisabledStatusCode := make(map[int]int, len(updatedKeys))
+	nextDisabledGeneration := make(map[int]int64, len(updatedKeys))
 
 	for i, key := range updatedKeys {
 		normalized := normalizeMultiKeyValue(key)
@@ -190,6 +210,12 @@ func rebuildMultiKeyStatus(originInfo model.ChannelInfo, originKey string, updat
 			if snapshot.disabledTime != 0 {
 				nextDisabledTime[i] = snapshot.disabledTime
 			}
+			if snapshot.disabledStatusCode >= 100 && snapshot.disabledStatusCode <= 599 {
+				nextDisabledStatusCode[i] = snapshot.disabledStatusCode
+			}
+			if snapshot.disabledGeneration > 0 {
+				nextDisabledGeneration[i] = snapshot.disabledGeneration
+			}
 		}
 	}
 
@@ -202,11 +228,19 @@ func rebuildMultiKeyStatus(originInfo model.ChannelInfo, originKey string, updat
 	if len(nextDisabledTime) == 0 {
 		nextDisabledTime = nil
 	}
+	if len(nextDisabledStatusCode) == 0 {
+		nextDisabledStatusCode = nil
+	}
+	if len(nextDisabledGeneration) == 0 {
+		nextDisabledGeneration = nil
+	}
 
 	originInfo.MultiKeySize = len(updatedKeys)
 	originInfo.MultiKeyStatusList = nextStatusList
 	originInfo.MultiKeyDisabledReason = nextDisabledReason
 	originInfo.MultiKeyDisabledTime = nextDisabledTime
+	originInfo.MultiKeyDisabledStatusCode = nextDisabledStatusCode
+	originInfo.MultiKeyDisabledGeneration = nextDisabledGeneration
 	return originInfo
 }
 
@@ -1648,6 +1682,23 @@ func ManageMultiKeys(c *gin.Context) {
 	lock.Lock()
 	defer lock.Unlock()
 
+	// 等待渠道锁期间密钥可能被自动禁用；写操作必须基于锁内重新读取的最新代次。
+	channel, err = model.GetChannelById(request.ChannelId, true)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "渠道不存在",
+		})
+		return
+	}
+	if !channel.ChannelInfo.IsMultiKey {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "该渠道不是多密钥模式",
+		})
+		return
+	}
+
 	switch request.Action {
 	case "get_key_status":
 		keys := channel.GetKeys()
@@ -1792,6 +1843,12 @@ func ManageMultiKeys(c *gin.Context) {
 		}
 
 		channel.ChannelInfo.MultiKeyStatusList[keyIndex] = 2 // disabled
+		if channel.ChannelInfo.MultiKeyDisabledStatusCode != nil {
+			delete(channel.ChannelInfo.MultiKeyDisabledStatusCode, keyIndex)
+		}
+		if channel.ChannelInfo.MultiKeyDisabledGeneration != nil {
+			delete(channel.ChannelInfo.MultiKeyDisabledGeneration, keyIndex)
+		}
 
 		err = channel.Update()
 		if err != nil {
@@ -1834,6 +1891,12 @@ func ManageMultiKeys(c *gin.Context) {
 		if channel.ChannelInfo.MultiKeyDisabledReason != nil {
 			delete(channel.ChannelInfo.MultiKeyDisabledReason, keyIndex)
 		}
+		if channel.ChannelInfo.MultiKeyDisabledStatusCode != nil {
+			delete(channel.ChannelInfo.MultiKeyDisabledStatusCode, keyIndex)
+		}
+		if channel.ChannelInfo.MultiKeyDisabledGeneration != nil {
+			delete(channel.ChannelInfo.MultiKeyDisabledGeneration, keyIndex)
+		}
 
 		err = channel.Update()
 		if err != nil {
@@ -1858,6 +1921,8 @@ func ManageMultiKeys(c *gin.Context) {
 		channel.ChannelInfo.MultiKeyStatusList = make(map[int]int)
 		channel.ChannelInfo.MultiKeyDisabledTime = make(map[int]int64)
 		channel.ChannelInfo.MultiKeyDisabledReason = make(map[int]string)
+		channel.ChannelInfo.MultiKeyDisabledStatusCode = make(map[int]int)
+		channel.ChannelInfo.MultiKeyDisabledGeneration = make(map[int]int64)
 
 		err = channel.Update()
 		if err != nil {
@@ -1894,6 +1959,12 @@ func ManageMultiKeys(c *gin.Context) {
 			// 只禁用当前启用的密钥
 			if status == 1 {
 				channel.ChannelInfo.MultiKeyStatusList[i] = 2 // disabled
+				if channel.ChannelInfo.MultiKeyDisabledStatusCode != nil {
+					delete(channel.ChannelInfo.MultiKeyDisabledStatusCode, i)
+				}
+				if channel.ChannelInfo.MultiKeyDisabledGeneration != nil {
+					delete(channel.ChannelInfo.MultiKeyDisabledGeneration, i)
+				}
 				disabledCount++
 			}
 		}
@@ -1942,6 +2013,8 @@ func ManageMultiKeys(c *gin.Context) {
 		var newStatusList = make(map[int]int)
 		var newDisabledTime = make(map[int]int64)
 		var newDisabledReason = make(map[int]string)
+		var newDisabledStatusCode = make(map[int]int)
+		var newDisabledGeneration = make(map[int]int64)
 
 		newIndex := 0
 		for i, key := range keys {
@@ -1968,6 +2041,16 @@ func ManageMultiKeys(c *gin.Context) {
 					newDisabledReason[newIndex] = r
 				}
 			}
+			if channel.ChannelInfo.MultiKeyDisabledStatusCode != nil {
+				if code, exists := channel.ChannelInfo.MultiKeyDisabledStatusCode[i]; exists {
+					newDisabledStatusCode[newIndex] = code
+				}
+			}
+			if channel.ChannelInfo.MultiKeyDisabledGeneration != nil {
+				if generation, exists := channel.ChannelInfo.MultiKeyDisabledGeneration[i]; exists {
+					newDisabledGeneration[newIndex] = generation
+				}
+			}
 			newIndex++
 		}
 
@@ -1985,6 +2068,8 @@ func ManageMultiKeys(c *gin.Context) {
 		channel.ChannelInfo.MultiKeyStatusList = newStatusList
 		channel.ChannelInfo.MultiKeyDisabledTime = newDisabledTime
 		channel.ChannelInfo.MultiKeyDisabledReason = newDisabledReason
+		channel.ChannelInfo.MultiKeyDisabledStatusCode = newDisabledStatusCode
+		channel.ChannelInfo.MultiKeyDisabledGeneration = newDisabledGeneration
 
 		err = channel.Update()
 		if err != nil {
@@ -2006,6 +2091,8 @@ func ManageMultiKeys(c *gin.Context) {
 		var newStatusList = make(map[int]int)
 		var newDisabledTime = make(map[int]int64)
 		var newDisabledReason = make(map[int]string)
+		var newDisabledStatusCode = make(map[int]int)
+		var newDisabledGeneration = make(map[int]int64)
 
 		newIndex := 0
 		for i, key := range keys {
@@ -2034,6 +2121,16 @@ func ManageMultiKeys(c *gin.Context) {
 							newDisabledReason[newIndex] = r
 						}
 					}
+					if channel.ChannelInfo.MultiKeyDisabledStatusCode != nil {
+						if code, exists := channel.ChannelInfo.MultiKeyDisabledStatusCode[i]; exists {
+							newDisabledStatusCode[newIndex] = code
+						}
+					}
+					if channel.ChannelInfo.MultiKeyDisabledGeneration != nil {
+						if generation, exists := channel.ChannelInfo.MultiKeyDisabledGeneration[i]; exists {
+							newDisabledGeneration[newIndex] = generation
+						}
+					}
 				}
 				newIndex++
 			}
@@ -2053,6 +2150,8 @@ func ManageMultiKeys(c *gin.Context) {
 		channel.ChannelInfo.MultiKeyStatusList = newStatusList
 		channel.ChannelInfo.MultiKeyDisabledTime = newDisabledTime
 		channel.ChannelInfo.MultiKeyDisabledReason = newDisabledReason
+		channel.ChannelInfo.MultiKeyDisabledStatusCode = newDisabledStatusCode
+		channel.ChannelInfo.MultiKeyDisabledGeneration = newDisabledGeneration
 
 		err = channel.Update()
 		if err != nil {

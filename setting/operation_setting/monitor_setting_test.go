@@ -3,9 +3,21 @@ package operation_setting
 import (
 	"testing"
 
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMonitorSettingKeepsDefaultSkipStatusCodeWhenOldConfigIsMissing(t *testing.T) {
+	setting := MonitorSetting{MultiKeyAutoDisabledTestSkipStatusCodes: "401"}
+
+	err := config.UpdateConfigFromMap(&setting, map[string]string{
+		"auto_test_channel_enabled": "true",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "401", setting.MultiKeyAutoDisabledTestSkipStatusCodes)
+}
 
 func TestGetMonitorSetting_ChannelTestEnabledEnvOverridesEnabledConfig(t *testing.T) {
 	orig := monitorSetting

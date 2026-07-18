@@ -54,6 +54,11 @@ func ShouldDisableByStatusCode(code int) bool {
 	return shouldMatchStatusCodeRanges(AutomaticDisableStatusCodeRanges, code)
 }
 
+// MatchesHTTPStatusCodeRanges 判断状态码是否命中已解析的规则范围。
+func MatchesHTTPStatusCodeRanges(ranges []StatusCodeRange, code int) bool {
+	return shouldMatchStatusCodeRanges(ranges, code)
+}
+
 func AutomaticRetryStatusCodesToString() string {
 	return statusCodeRangesToString(AutomaticRetryStatusCodeRanges)
 }
