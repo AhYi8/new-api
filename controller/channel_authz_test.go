@@ -212,6 +212,7 @@ func TestRebuildMultiKeyStatusTreatsReplaceAsNewKeys(t *testing.T) {
 	assert.Nil(t, updated.MultiKeyDisabledReason)
 	assert.Nil(t, updated.MultiKeyDisabledTime)
 	assert.Zero(t, updated.MultiKeyPollingIndex)
+	assert.Zero(t, updated.MultiKeyTestIndex)
 }
 
 func TestChannelStatusValidation(t *testing.T) {

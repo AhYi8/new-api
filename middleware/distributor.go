@@ -441,6 +441,16 @@ func getTaskOriginModelName(c *gin.Context) string {
 }
 
 func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string) *types.NewAPIError {
+	return setupContextForSelectedChannel(c, channel, modelName, nil)
+}
+
+// SetupContextForSelectedChannelWithKeyIndex 仅供内部健康检查指定多密钥索引。
+// 正常转发与普通渠道测试必须继续使用 SetupContextForSelectedChannel，以保持原有随机或轮询选钥行为。
+func SetupContextForSelectedChannelWithKeyIndex(c *gin.Context, channel *model.Channel, modelName string, keyIndex int) *types.NewAPIError {
+	return setupContextForSelectedChannel(c, channel, modelName, &keyIndex)
+}
+
+func setupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string, keyIndex *int) *types.NewAPIError {
 	c.Set("original_model", modelName) // for retry
 	if channel == nil {
 		return types.NewError(errors.New("channel is nil"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
@@ -465,7 +475,15 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelModelMapping, channel.GetModelMapping())
 	common.SetContextKey(c, constant.ContextKeyChannelStatusCodeMapping, channel.GetStatusCodeMapping())
 
-	key, index, newAPIError := channel.GetNextEnabledKey()
+	key := ""
+	index := 0
+	var newAPIError *types.NewAPIError
+	if keyIndex == nil {
+		key, index, newAPIError = channel.GetNextEnabledKey()
+	} else {
+		index = *keyIndex
+		key, newAPIError = channel.GetMultiKeyByIndex(index)
+	}
 	if newAPIError != nil {
 		return newAPIError
 	}

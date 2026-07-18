@@ -36,10 +36,15 @@ func DisableChannel(channelError types.ChannelError, reason string) {
 func EnableChannel(channelId int, usingKey string, channelName string) {
 	success := model.UpdateChannelStatus(channelId, usingKey, common.ChannelStatusEnabled, "")
 	if success {
-		subject := fmt.Sprintf("通道「%s」（#%d）已被启用", channelName, channelId)
-		content := fmt.Sprintf("通道「%s」（#%d）已被启用", channelName, channelId)
-		NotifyRootUser(formatNotifyType(channelId, common.ChannelStatusEnabled), subject, content)
+		NotifyChannelEnabled(channelId, channelName)
 	}
+}
+
+// NotifyChannelEnabled 只用于渠道顶层状态实际恢复时发送通知，避免单个密钥恢复产生重复通知。
+func NotifyChannelEnabled(channelId int, channelName string) {
+	subject := fmt.Sprintf("通道「%s」（#%d）已被启用", channelName, channelId)
+	content := fmt.Sprintf("通道「%s」（#%d）已被启用", channelName, channelId)
+	NotifyRootUser(formatNotifyType(channelId, common.ChannelStatusEnabled), subject, content)
 }
 
 func ShouldDisableChannel(err *types.NewAPIError) bool {

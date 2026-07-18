@@ -123,6 +123,7 @@ func rebuildMultiKeyStatus(originInfo model.ChannelInfo, originKey string, updat
 		originInfo.MultiKeyDisabledReason = nil
 		originInfo.MultiKeyDisabledTime = nil
 		originInfo.MultiKeyPollingIndex = 0
+		originInfo.MultiKeyTestIndex = 0
 		return originInfo
 	}
 
@@ -132,6 +133,7 @@ func rebuildMultiKeyStatus(originInfo model.ChannelInfo, originKey string, updat
 		originInfo.MultiKeyDisabledReason = nil
 		originInfo.MultiKeyDisabledTime = nil
 		originInfo.MultiKeyPollingIndex = 0
+		originInfo.MultiKeyTestIndex = 0
 		return originInfo
 	}
 
