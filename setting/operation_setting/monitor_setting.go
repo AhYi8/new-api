@@ -8,9 +8,10 @@ import (
 )
 
 type MonitorSetting struct {
-	AutoTestChannelEnabled bool    `json:"auto_test_channel_enabled"`
-	AutoTestChannelMinutes float64 `json:"auto_test_channel_minutes"`
-	ChannelTestMode        string  `json:"channel_test_mode"`
+	AutoTestChannelEnabled        bool    `json:"auto_test_channel_enabled"`
+	AutoTestChannelMinutes        float64 `json:"auto_test_channel_minutes"`
+	ChannelTestMode               string  `json:"channel_test_mode"`
+	MultiKeyAutoDisabledTestLimit int     `json:"multi_key_auto_disabled_test_limit"`
 }
 
 const (
@@ -20,9 +21,10 @@ const (
 
 // 默认配置
 var monitorSetting = MonitorSetting{
-	AutoTestChannelEnabled: false,
-	AutoTestChannelMinutes: 10,
-	ChannelTestMode:        ChannelTestModeScheduledAll,
+	AutoTestChannelEnabled:        false,
+	AutoTestChannelMinutes:        10,
+	ChannelTestMode:               ChannelTestModeScheduledAll,
+	MultiKeyAutoDisabledTestLimit: 0,
 }
 
 func init() {
@@ -47,6 +49,9 @@ func GetMonitorSetting() *MonitorSetting {
 	}
 	if monitorSetting.ChannelTestMode != ChannelTestModePassiveRecovery {
 		monitorSetting.ChannelTestMode = ChannelTestModeScheduledAll
+	}
+	if monitorSetting.MultiKeyAutoDisabledTestLimit < 0 {
+		monitorSetting.MultiKeyAutoDisabledTestLimit = 0
 	}
 	return &monitorSetting
 }

@@ -298,6 +298,12 @@ func UpdateOption(c *gin.Context) {
 			})
 			return
 		}
+	case "monitor_setting.multi_key_auto_disabled_test_limit":
+		value, parseErr := strconv.Atoi(option.Value.(string))
+		if parseErr != nil || value < 0 {
+			common.ApiErrorMsg(c, "自动禁用密钥测试批量数必须是非负整数")
+			return
+		}
 	case "console_setting.api_info":
 		err = console_setting.ValidateConsoleSettings(option.Value.(string), "ApiInfo")
 		if err != nil {

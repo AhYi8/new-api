@@ -82,6 +82,7 @@ const routingReliabilitySchema = z
         .int()
         .min(1, 'Interval must be at least 1 minute'),
       channel_test_mode: z.enum(channelTestModes),
+      multi_key_auto_disabled_test_limit: z.coerce.number().int().min(0),
     }),
   })
   .superRefine((values, ctx) => {
@@ -127,6 +128,7 @@ type RoutingReliabilitySectionProps = {
     'monitor_setting.auto_test_channel_enabled': boolean
     'monitor_setting.auto_test_channel_minutes': number
     'monitor_setting.channel_test_mode': ChannelTestMode
+    'monitor_setting.multi_key_auto_disabled_test_limit': number
   }
 }
 
@@ -145,6 +147,7 @@ type NormalizedRoutingReliabilityValues = {
   'monitor_setting.auto_test_channel_enabled': boolean
   'monitor_setting.auto_test_channel_minutes': number
   'monitor_setting.channel_test_mode': ChannelTestMode
+  'monitor_setting.multi_key_auto_disabled_test_limit': number
 }
 
 function normalizeChannelTestMode(value?: string): ChannelTestMode {
@@ -171,6 +174,8 @@ const buildFormDefaults = (
     channel_test_mode: normalizeChannelTestMode(
       defaults['monitor_setting.channel_test_mode']
     ),
+    multi_key_auto_disabled_test_limit:
+      defaults['monitor_setting.multi_key_auto_disabled_test_limit'] ?? 0,
   },
 })
 
@@ -197,6 +202,8 @@ const normalizeDefaults = (
   'monitor_setting.channel_test_mode': normalizeChannelTestMode(
     defaults['monitor_setting.channel_test_mode']
   ),
+  'monitor_setting.multi_key_auto_disabled_test_limit':
+    defaults['monitor_setting.multi_key_auto_disabled_test_limit'] ?? 0,
 })
 
 const normalizeFormValues = (
@@ -220,6 +227,8 @@ const normalizeFormValues = (
   'monitor_setting.auto_test_channel_minutes':
     values.monitor_setting.auto_test_channel_minutes,
   'monitor_setting.channel_test_mode': values.monitor_setting.channel_test_mode,
+  'monitor_setting.multi_key_auto_disabled_test_limit':
+    values.monitor_setting.multi_key_auto_disabled_test_limit,
 })
 
 export function RoutingReliabilitySection({
@@ -473,6 +482,32 @@ export function RoutingReliabilitySection({
                       />
                     </FormControl>
                   </SettingsSwitchItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name='monitor_setting.multi_key_auto_disabled_test_limit'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      {t('Auto-disabled key test batch size')}
+                    </FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        min={0}
+                        step={1}
+                        {...safeNumberFieldProps(field)}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'Maximum auto-disabled keys tested per multi-key channel in each scheduled run. Set to 0 to test all.'
+                      )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
                 )}
               />
             </div>

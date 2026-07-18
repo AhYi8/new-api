@@ -73,6 +73,10 @@ func resolveChannelTestUserID(c *gin.Context) (int, error) {
 }
 
 func testChannel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) testResult {
+	return testChannelWithKeyIndex(ctx, channel, testUserID, testModel, endpointType, isStream, nil)
+}
+
+func testChannelWithKeyIndex(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool, keyIndex *int) testResult {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -173,7 +177,12 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	group, _ := model.GetUserGroup(testUserID, false)
 	c.Set("group", group)
 
-	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, testModel)
+	var newAPIError *types.NewAPIError
+	if keyIndex == nil {
+		newAPIError = middleware.SetupContextForSelectedChannel(c, channel, testModel)
+	} else {
+		newAPIError = middleware.SetupContextForSelectedChannelWithKeyIndex(c, channel, testModel, *keyIndex)
+	}
 	if newAPIError != nil {
 		return testResult{
 			context:     c,
@@ -893,11 +902,159 @@ func TestChannel(c *gin.Context) {
 // channelTestSummary records the outcome of one channel test cycle so the
 // system task can persist a per-run result for history.
 type channelTestSummary struct {
-	Tested    int `json:"tested"`
-	Succeeded int `json:"succeeded"`
-	Failed    int `json:"failed"`
-	Disabled  int `json:"disabled"`
-	Enabled   int `json:"enabled"`
+	Tested       int `json:"tested"`
+	Succeeded    int `json:"succeeded"`
+	Failed       int `json:"failed"`
+	Disabled     int `json:"disabled"`
+	Enabled      int `json:"enabled"`
+	KeyTested    int `json:"key_tested"`
+	KeySucceeded int `json:"key_succeeded"`
+	KeyFailed    int `json:"key_failed"`
+	KeyRecovered int `json:"key_recovered"`
+}
+
+type autoDisabledMultiKeyCandidate struct {
+	index int
+	key   string
+}
+
+type autoDisabledMultiKeyTester func(ctx context.Context, channel *model.Channel, testUserID int, keyIndex int) testResult
+
+func collectAutoDisabledMultiKeyCandidates(channel *model.Channel, limit int) []autoDisabledMultiKeyCandidate {
+	if channel == nil || channel.Status == common.ChannelStatusManuallyDisabled || !channel.ChannelInfo.IsMultiKey {
+		return nil
+	}
+
+	keys := channel.GetKeys()
+	if len(keys) == 0 {
+		return nil
+	}
+	start := channel.ChannelInfo.MultiKeyTestIndex % len(keys)
+	if start < 0 {
+		start += len(keys)
+	}
+	candidates := make([]autoDisabledMultiKeyCandidate, 0, len(keys))
+	for offset := 0; offset < len(keys); offset++ {
+		index := (start + offset) % len(keys)
+		key := keys[index]
+		if strings.TrimSpace(key) == "" || channel.ChannelInfo.MultiKeyStatusList[index] != common.ChannelStatusAutoDisabled {
+			continue
+		}
+		candidates = append(candidates, autoDisabledMultiKeyCandidate{index: index, key: key})
+		if limit > 0 && len(candidates) >= limit {
+			break
+		}
+	}
+	return candidates
+}
+
+// getCurrentAutoDisabledMultiKeyCandidateChannel 在发起上游请求前复核候选，并返回最新渠道配置。
+// 这样既不会忽略测试期间的人工禁用或密钥编辑，也不会继续使用旧的上游地址等配置。
+func getCurrentAutoDisabledMultiKeyCandidateChannel(channelID int, candidate autoDisabledMultiKeyCandidate) (*model.Channel, bool) {
+	channel, err := model.GetChannelById(channelID, true)
+	if err != nil || channel.Status == common.ChannelStatusManuallyDisabled || !channel.ChannelInfo.IsMultiKey {
+		return nil, false
+	}
+	keys := channel.GetKeys()
+	current := candidate.index >= 0 && candidate.index < len(keys) &&
+		keys[candidate.index] == candidate.key &&
+		channel.ChannelInfo.MultiKeyStatusList[candidate.index] == common.ChannelStatusAutoDisabled
+	return channel, current
+}
+
+func waitChannelTestInterval(ctx context.Context) bool {
+	if common.RequestInterval <= 0 {
+		return true
+	}
+	if ctx == nil {
+		time.Sleep(common.RequestInterval)
+		return true
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(common.RequestInterval):
+		return true
+	}
+}
+
+// performAutoDisabledMultiKeyTests 按配置重测非手动禁用渠道中的自动禁用密钥。
+// 测试成功结果按渠道一次性写回，写回阶段会重新校验索引、密钥文本和当前状态。
+func performAutoDisabledMultiKeyTests(ctx context.Context, channels []*model.Channel, testUserID int, limit int, report func(processed int)) (channelTestSummary, bool) {
+	return performAutoDisabledMultiKeyTestsWithTester(ctx, channels, testUserID, limit, report, func(ctx context.Context, channel *model.Channel, testUserID int, keyIndex int) testResult {
+		return testChannelWithKeyIndex(ctx, channel, testUserID, "", "", shouldUseStreamForAutomaticChannelTest(channel), &keyIndex)
+	})
+}
+
+func performAutoDisabledMultiKeyTestsWithTester(ctx context.Context, channels []*model.Channel, testUserID int, limit int, report func(processed int), tester autoDisabledMultiKeyTester) (channelTestSummary, bool) {
+	summary := channelTestSummary{}
+	cacheChanged := false
+
+	for _, channel := range channels {
+		if ctx != nil && ctx.Err() != nil {
+			break
+		}
+		candidates := collectAutoDisabledMultiKeyCandidates(channel, limit)
+		if len(candidates) == 0 {
+			continue
+		}
+
+		succeeded := make(map[int]string, len(candidates))
+		lastTestedIndex := -1
+		for _, candidate := range candidates {
+			if ctx != nil && ctx.Err() != nil {
+				break
+			}
+			currentChannel, current := getCurrentAutoDisabledMultiKeyCandidateChannel(channel.Id, candidate)
+			if !current {
+				continue
+			}
+
+			result := tester(ctx, currentChannel, testUserID, candidate.index)
+			lastTestedIndex = candidate.index
+			summary.KeyTested++
+			if result.localErr == nil && result.newAPIError == nil {
+				summary.KeySucceeded++
+				succeeded[candidate.index] = candidate.key
+			} else {
+				summary.KeyFailed++
+			}
+			if report != nil {
+				report(summary.KeyTested)
+			}
+
+			if !waitChannelTestInterval(ctx) {
+				break
+			}
+		}
+		// 仅限量测试需要持久化轮转起点；测试全部时写游标没有业务收益，只会增加数据库写入。
+		if limit > 0 && lastTestedIndex >= 0 {
+			if err := model.UpdateMultiKeyTestIndex(channel.Id, lastTestedIndex+1); err != nil {
+				common.SysLog(fmt.Sprintf("更新多密钥健康检查游标失败：channel_id=%d, error=%v", channel.Id, err))
+			}
+		}
+
+		if !common.AutomaticEnableChannelEnabled || len(succeeded) == 0 {
+			continue
+		}
+		recovery, err := model.RecoverAutoDisabledMultiKeys(channel.Id, succeeded)
+		if err != nil {
+			common.SysLog(fmt.Sprintf("恢复多密钥渠道自动禁用密钥失败：channel_id=%d, error=%v", channel.Id, err))
+			continue
+		}
+		if recovery.Recovered == 0 {
+			continue
+		}
+
+		summary.KeyRecovered += recovery.Recovered
+		cacheChanged = true
+		if recovery.ChannelEnabled {
+			summary.Enabled++
+			service.NotifyChannelEnabled(channel.Id, channel.Name)
+		}
+	}
+
+	return summary, cacheChanged
 }
 
 // performChannelTests runs the channel test loop synchronously, honoring ctx
@@ -968,16 +1125,8 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 		}
 
 		channel.UpdateResponseTime(milliseconds)
-		if common.RequestInterval > 0 {
-			if ctx == nil {
-				time.Sleep(common.RequestInterval)
-			} else {
-				select {
-				case <-ctx.Done():
-					return summary
-				case <-time.After(common.RequestInterval):
-				}
-			}
+		if !waitChannelTestInterval(ctx) {
+			return summary
 		}
 	}
 	if report != nil && (ctx == nil || ctx.Err() == nil) {
@@ -1003,12 +1152,62 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, report fu
 	if err != nil {
 		return channelTestSummary{}, err
 	}
-	if strings.TrimSpace(mode) == "" {
-		mode = operation_setting.GetMonitorSetting().ChannelTestMode
+	isScheduledRun := strings.TrimSpace(mode) == ""
+	multiKeyTestLimit := 0
+	if isScheduledRun {
+		monitorSetting := operation_setting.GetMonitorSetting()
+		mode = monitorSetting.ChannelTestMode
+		multiKeyTestLimit = monitorSetting.MultiKeyAutoDisabledTestLimit
 	}
 	selected := selectChannelsForAutomaticTest(channels, mode)
 	allowDisable := mode != operation_setting.ChannelTestModePassiveRecovery
-	summary := performChannelTests(ctx, selected, testUserID, allowDisable, report)
+	channelReport := report
+	if isScheduledRun && report != nil {
+		// 定时任务固定分为普通渠道测试和密钥恢复两个阶段，避免阶段间候选数量变化导致进度倒退。
+		channelReport = func(processed, total int) {
+			if total <= 0 {
+				report(0, 1000)
+				return
+			}
+			report(processed*500/total, 1000)
+		}
+	}
+	summary := performChannelTests(ctx, selected, testUserID, allowDisable, channelReport)
+	cacheChanged := summary.Disabled > 0 || summary.Enabled > 0
+	if isScheduledRun && (ctx == nil || ctx.Err() == nil) {
+		// 普通渠道测试可能改变渠道或密钥状态，因此批量密钥恢复必须基于测试后的最新快照。
+		channels, err = model.GetAllChannels(0, 0, true, false)
+		if err != nil {
+			if cacheChanged {
+				model.InitChannelCache()
+			}
+			return summary, err
+		}
+		keyTestTotal := 0
+		for _, channel := range channels {
+			keyTestTotal += len(collectAutoDisabledMultiKeyCandidates(channel, multiKeyTestLimit))
+		}
+		var keyReport func(processed int)
+		if report != nil && keyTestTotal > 0 {
+			keyReport = func(processed int) {
+				report(500+processed*499/keyTestTotal, 1000)
+			}
+		}
+		keySummary, keyCacheChanged := performAutoDisabledMultiKeyTests(ctx, channels, testUserID, multiKeyTestLimit, keyReport)
+		summary.Enabled += keySummary.Enabled
+		summary.KeyTested += keySummary.KeyTested
+		summary.KeySucceeded += keySummary.KeySucceeded
+		summary.KeyFailed += keySummary.KeyFailed
+		summary.KeyRecovered += keySummary.KeyRecovered
+		cacheChanged = cacheChanged || keyCacheChanged
+		if report != nil && (ctx == nil || ctx.Err() == nil) {
+			report(1000, 1000)
+		}
+	}
+	if cacheChanged {
+		// 整轮只刷新一次，避免批量状态变化时对渠道和能力表反复全量扫描。
+		model.InitChannelCache()
+	}
 	if notify && (ctx == nil || ctx.Err() == nil) {
 		service.NotifyRootUser(dto.NotifyTypeChannelTest, "通道测试完成", "所有通道测试已完成")
 	}

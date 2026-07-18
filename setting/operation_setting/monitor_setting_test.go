@@ -41,3 +41,15 @@ func TestGetMonitorSetting_ChannelTestEnabledEnvCanEnableDisabledConfig(t *testi
 	assert.True(t, setting.AutoTestChannelEnabled)
 	assert.Equal(t, float64(12), setting.AutoTestChannelMinutes)
 }
+
+func TestGetMonitorSetting_NormalizesNegativeMultiKeyTestLimit(t *testing.T) {
+	orig := monitorSetting
+	t.Cleanup(func() { monitorSetting = orig })
+
+	monitorSetting = MonitorSetting{MultiKeyAutoDisabledTestLimit: -1}
+
+	setting := GetMonitorSetting()
+
+	require.NotNil(t, setting)
+	assert.Zero(t, setting.MultiKeyAutoDisabledTestLimit)
+}
