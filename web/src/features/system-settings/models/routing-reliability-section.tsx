@@ -83,6 +83,7 @@ const routingReliabilitySchema = z
         .min(1, 'Interval must be at least 1 minute'),
       channel_test_mode: z.enum(channelTestModes),
       multi_key_auto_disabled_test_limit: z.coerce.number().int().min(0),
+      multi_key_auto_disabled_test_skip_status_codes: z.string(),
     }),
   })
   .superRefine((values, ctx) => {
@@ -93,9 +94,7 @@ const routingReliabilitySchema = z
       ctx.addIssue({
         code: 'custom',
         path: ['AutomaticDisableStatusCodes'],
-        message: `Invalid status code rules: ${disableParsed.invalidTokens.join(
-          ', '
-        )}`,
+        message: 'Invalid status code rules',
       })
     }
 
@@ -106,9 +105,21 @@ const routingReliabilitySchema = z
       ctx.addIssue({
         code: 'custom',
         path: ['AutomaticRetryStatusCodes'],
-        message: `Invalid status code rules: ${retryParsed.invalidTokens.join(
-          ', '
-        )}`,
+        message: 'Invalid status code rules',
+      })
+    }
+
+    const skipParsed = parseHttpStatusCodeRules(
+      values.monitor_setting.multi_key_auto_disabled_test_skip_status_codes
+    )
+    if (!skipParsed.ok) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [
+          'monitor_setting',
+          'multi_key_auto_disabled_test_skip_status_codes',
+        ],
+        message: 'Invalid status code rules',
       })
     }
   })
@@ -129,6 +140,7 @@ type RoutingReliabilitySectionProps = {
     'monitor_setting.auto_test_channel_minutes': number
     'monitor_setting.channel_test_mode': ChannelTestMode
     'monitor_setting.multi_key_auto_disabled_test_limit': number
+    'monitor_setting.multi_key_auto_disabled_test_skip_status_codes': string
   }
 }
 
@@ -148,6 +160,7 @@ type NormalizedRoutingReliabilityValues = {
   'monitor_setting.auto_test_channel_minutes': number
   'monitor_setting.channel_test_mode': ChannelTestMode
   'monitor_setting.multi_key_auto_disabled_test_limit': number
+  'monitor_setting.multi_key_auto_disabled_test_skip_status_codes': string
 }
 
 function normalizeChannelTestMode(value?: string): ChannelTestMode {
@@ -176,6 +189,10 @@ const buildFormDefaults = (
     ),
     multi_key_auto_disabled_test_limit:
       defaults['monitor_setting.multi_key_auto_disabled_test_limit'] ?? 0,
+    multi_key_auto_disabled_test_skip_status_codes:
+      defaults[
+        'monitor_setting.multi_key_auto_disabled_test_skip_status_codes'
+      ] ?? '401',
   },
 })
 
@@ -204,6 +221,12 @@ const normalizeDefaults = (
   ),
   'monitor_setting.multi_key_auto_disabled_test_limit':
     defaults['monitor_setting.multi_key_auto_disabled_test_limit'] ?? 0,
+  'monitor_setting.multi_key_auto_disabled_test_skip_status_codes':
+    parseHttpStatusCodeRules(
+      defaults[
+        'monitor_setting.multi_key_auto_disabled_test_skip_status_codes'
+      ] ?? '401'
+    ).normalized,
 })
 
 const normalizeFormValues = (
@@ -229,6 +252,10 @@ const normalizeFormValues = (
   'monitor_setting.channel_test_mode': values.monitor_setting.channel_test_mode,
   'monitor_setting.multi_key_auto_disabled_test_limit':
     values.monitor_setting.multi_key_auto_disabled_test_limit,
+  'monitor_setting.multi_key_auto_disabled_test_skip_status_codes':
+    parseHttpStatusCodeRules(
+      values.monitor_setting.multi_key_auto_disabled_test_skip_status_codes
+    ).normalized,
 })
 
 export function RoutingReliabilitySection({
@@ -258,6 +285,9 @@ export function RoutingReliabilitySection({
 
   const autoDisableStatusCodes = form.watch('AutomaticDisableStatusCodes')
   const autoRetryStatusCodes = form.watch('AutomaticRetryStatusCodes')
+  const autoDisabledKeyTestSkipStatusCodes = form.watch(
+    'monitor_setting.multi_key_auto_disabled_test_skip_status_codes'
+  )
   const channelTestMode = form.watch('monitor_setting.channel_test_mode')
   const autoDisableParsed = useMemo(
     () => parseHttpStatusCodeRules(autoDisableStatusCodes),
@@ -266,6 +296,10 @@ export function RoutingReliabilitySection({
   const autoRetryParsed = useMemo(
     () => parseHttpStatusCodeRules(autoRetryStatusCodes),
     [autoRetryStatusCodes]
+  )
+  const autoDisabledKeyTestSkipParsed = useMemo(
+    () => parseHttpStatusCodeRules(autoDisabledKeyTestSkipStatusCodes),
+    [autoDisabledKeyTestSkipStatusCodes]
   )
 
   const onSubmit = async (values: RoutingReliabilityFormValues) => {
@@ -505,6 +539,43 @@ export function RoutingReliabilitySection({
                       {t(
                         'Maximum auto-disabled keys tested per multi-key channel in each scheduled run. Set to 0 to test all.'
                       )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name='monitor_setting.multi_key_auto_disabled_test_skip_status_codes'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      {t('Auto-disabled key test skip status codes')}
+                    </FormLabel>
+                    <FormControl>
+                      <Input
+                        placeholder={t('e.g. 401, 403, 429, 500-599')}
+                        value={field.value}
+                        onChange={(event) => field.onChange(event.target.value)}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'Keys automatically disabled by these HTTP status codes are excluded from scheduled multi-key recovery tests.'
+                      )}{' '}
+                      {t(
+                        'Accepts comma-separated status codes and inclusive ranges.'
+                      )}{' '}
+                      {autoDisabledKeyTestSkipParsed.ok &&
+                        autoDisabledKeyTestSkipParsed.normalized &&
+                        autoDisabledKeyTestSkipParsed.normalized !==
+                          field.value.trim() && (
+                          <span className='text-muted-foreground'>
+                            {t('Normalized:')}{' '}
+                            {autoDisabledKeyTestSkipParsed.normalized}
+                          </span>
+                        )}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>

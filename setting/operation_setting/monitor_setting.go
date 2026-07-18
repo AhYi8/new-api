@@ -8,10 +8,11 @@ import (
 )
 
 type MonitorSetting struct {
-	AutoTestChannelEnabled        bool    `json:"auto_test_channel_enabled"`
-	AutoTestChannelMinutes        float64 `json:"auto_test_channel_minutes"`
-	ChannelTestMode               string  `json:"channel_test_mode"`
-	MultiKeyAutoDisabledTestLimit int     `json:"multi_key_auto_disabled_test_limit"`
+	AutoTestChannelEnabled                  bool    `json:"auto_test_channel_enabled"`
+	AutoTestChannelMinutes                  float64 `json:"auto_test_channel_minutes"`
+	ChannelTestMode                         string  `json:"channel_test_mode"`
+	MultiKeyAutoDisabledTestLimit           int     `json:"multi_key_auto_disabled_test_limit"`
+	MultiKeyAutoDisabledTestSkipStatusCodes string  `json:"multi_key_auto_disabled_test_skip_status_codes"`
 }
 
 const (
@@ -21,10 +22,11 @@ const (
 
 // 默认配置
 var monitorSetting = MonitorSetting{
-	AutoTestChannelEnabled:        false,
-	AutoTestChannelMinutes:        10,
-	ChannelTestMode:               ChannelTestModeScheduledAll,
-	MultiKeyAutoDisabledTestLimit: 0,
+	AutoTestChannelEnabled:                  false,
+	AutoTestChannelMinutes:                  10,
+	ChannelTestMode:                         ChannelTestModeScheduledAll,
+	MultiKeyAutoDisabledTestLimit:           0,
+	MultiKeyAutoDisabledTestSkipStatusCodes: "401",
 }
 
 func init() {

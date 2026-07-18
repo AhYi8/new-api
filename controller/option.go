@@ -280,7 +280,7 @@ func UpdateOption(c *gin.Context) {
 			})
 			return
 		}
-	case "AutomaticDisableStatusCodes":
+	case "AutomaticDisableStatusCodes", "monitor_setting.multi_key_auto_disabled_test_skip_status_codes":
 		_, err = operation_setting.ParseHTTPStatusCodeRanges(option.Value.(string))
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{

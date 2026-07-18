@@ -60,6 +60,7 @@ func TestResetStatusCode(t *testing.T) {
 			}
 			ResetStatusCode(newAPIError, tc.statusCodeConfig)
 			require.Equal(t, tc.expectedCode, newAPIError.StatusCode)
+			require.Equal(t, tc.statusCode, newAPIError.GetOriginalStatusCode())
 		})
 	}
 }

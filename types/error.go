@@ -88,14 +88,26 @@ const (
 )
 
 type NewAPIError struct {
-	Err            error
-	RelayError     any
-	skipRetry      bool
-	recordErrorLog *bool
-	errorType      ErrorType
-	errorCode      ErrorCode
-	StatusCode     int
-	Metadata       json.RawMessage
+	Err                error
+	RelayError         any
+	skipRetry          bool
+	recordErrorLog     *bool
+	errorType          ErrorType
+	errorCode          ErrorCode
+	StatusCode         int
+	OriginalStatusCode int
+	Metadata           json.RawMessage
+}
+
+// GetOriginalStatusCode 返回状态码映射前的上游状态码；未经过映射时回退到当前状态码。
+func (e *NewAPIError) GetOriginalStatusCode() int {
+	if e == nil {
+		return 0
+	}
+	if e.OriginalStatusCode != 0 {
+		return e.OriginalStatusCode
+	}
+	return e.StatusCode
 }
 
 // Unwrap enables errors.Is / errors.As to work with NewAPIError by exposing the underlying error.

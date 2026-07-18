@@ -87,6 +87,10 @@ const MODELS_SECTIONS = [
             settings['monitor_setting.channel_test_mode'],
           'monitor_setting.multi_key_auto_disabled_test_limit':
             settings['monitor_setting.multi_key_auto_disabled_test_limit'],
+          'monitor_setting.multi_key_auto_disabled_test_skip_status_codes':
+            settings[
+              'monitor_setting.multi_key_auto_disabled_test_skip_status_codes'
+            ],
         }}
       />
     ),

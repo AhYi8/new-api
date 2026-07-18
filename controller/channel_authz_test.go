@@ -164,6 +164,10 @@ func TestRebuildMultiKeyStatusPreservesExistingKeyState(t *testing.T) {
 		MultiKeyDisabledTime: map[int]int64{
 			0: 123456,
 		},
+		MultiKeyDisabledStatusCode: map[int]int{
+			0: 401,
+		},
+		MultiKeyDisabledGeneration: map[int]int64{0: 7},
 	}
 
 	updated := rebuildMultiKeyStatus(
@@ -177,6 +181,8 @@ func TestRebuildMultiKeyStatusPreservesExistingKeyState(t *testing.T) {
 	assert.Equal(t, common.ChannelStatusManuallyDisabled, updated.MultiKeyStatusList[1])
 	assert.Equal(t, "manual disabled", updated.MultiKeyDisabledReason[1])
 	assert.Equal(t, int64(123456), updated.MultiKeyDisabledTime[1])
+	assert.Equal(t, 401, updated.MultiKeyDisabledStatusCode[1])
+	assert.Equal(t, int64(7), updated.MultiKeyDisabledGeneration[1])
 	assert.NotContains(t, updated.MultiKeyStatusList, 0)
 	assert.NotContains(t, updated.MultiKeyStatusList, 2)
 }
@@ -198,6 +204,11 @@ func TestRebuildMultiKeyStatusTreatsReplaceAsNewKeys(t *testing.T) {
 			0: 123456,
 			1: 234567,
 		},
+		MultiKeyDisabledStatusCode: map[int]int{
+			0: 401,
+			1: 500,
+		},
+		MultiKeyDisabledGeneration: map[int]int64{0: 7, 1: 8},
 	}
 
 	updated := rebuildMultiKeyStatus(
@@ -211,6 +222,8 @@ func TestRebuildMultiKeyStatusTreatsReplaceAsNewKeys(t *testing.T) {
 	assert.Nil(t, updated.MultiKeyStatusList)
 	assert.Nil(t, updated.MultiKeyDisabledReason)
 	assert.Nil(t, updated.MultiKeyDisabledTime)
+	assert.Nil(t, updated.MultiKeyDisabledStatusCode)
+	assert.Nil(t, updated.MultiKeyDisabledGeneration)
 	assert.Zero(t, updated.MultiKeyPollingIndex)
 	assert.Zero(t, updated.MultiKeyTestIndex)
 }

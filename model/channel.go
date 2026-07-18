@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -60,14 +61,17 @@ type Channel struct {
 }
 
 type ChannelInfo struct {
-	IsMultiKey             bool                  `json:"is_multi_key"`                        // 是否多Key模式
-	MultiKeySize           int                   `json:"multi_key_size"`                      // 多Key模式下的Key数量
-	MultiKeyStatusList     map[int]int           `json:"multi_key_status_list"`               // key状态列表，key index -> status
-	MultiKeyDisabledReason map[int]string        `json:"multi_key_disabled_reason,omitempty"` // key禁用原因列表，key index -> reason
-	MultiKeyDisabledTime   map[int]int64         `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
-	MultiKeyPollingIndex   int                   `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
-	MultiKeyTestIndex      int                   `json:"multi_key_test_index"`                // 自动禁用密钥健康检查的轮转起点
-	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
+	IsMultiKey                 bool                  `json:"is_multi_key"`                             // 是否多Key模式
+	MultiKeySize               int                   `json:"multi_key_size"`                           // 多Key模式下的Key数量
+	MultiKeyStatusList         map[int]int           `json:"multi_key_status_list"`                    // key状态列表，key index -> status
+	MultiKeyDisabledReason     map[int]string        `json:"multi_key_disabled_reason,omitempty"`      // key禁用原因列表，key index -> reason
+	MultiKeyDisabledTime       map[int]int64         `json:"multi_key_disabled_time,omitempty"`        // key禁用时间列表，key index -> time
+	MultiKeyDisabledStatusCode map[int]int           `json:"multi_key_disabled_status_code,omitempty"` // key自动禁用状态码，key index -> HTTP status code
+	MultiKeyDisabledGeneration map[int]int64         `json:"multi_key_disabled_generation,omitempty"`  // key自动禁用代次，防止旧测试结果恢复新的禁用事件
+	MultiKeyGenerationCounter  int64                 `json:"multi_key_generation_counter,omitempty"`   // 渠道级单调代次计数器，密钥元数据清理后仍保留
+	MultiKeyPollingIndex       int                   `json:"multi_key_polling_index"`                  // 多Key模式下轮询的key索引
+	MultiKeyTestIndex          int                   `json:"multi_key_test_index"`                     // 自动禁用密钥健康检查的轮转起点
+	MultiKeyMode               constant.MultiKeyMode `json:"multi_key_mode"`
 }
 
 type ChannelSortOptions struct {
@@ -195,6 +199,31 @@ func (channel *Channel) GetKeys() []string {
 	// Otherwise, fall back to splitting by newline
 	keys := strings.Split(strings.Trim(channel.Key, "\n"), "\n")
 	return keys
+}
+
+// GetMultiKeyDisabledStatusCode 返回密钥自动禁用时记录的 HTTP 状态码。
+// 旧数据没有结构化字段时，兼容解析禁用原因中的稳定 status_code= 前缀。
+func (channel *Channel) GetMultiKeyDisabledStatusCode(index int) int {
+	if channel == nil || index < 0 {
+		return 0
+	}
+	if code := channel.ChannelInfo.MultiKeyDisabledStatusCode[index]; code >= 100 && code <= 599 {
+		return code
+	}
+	reason := strings.TrimSpace(channel.ChannelInfo.MultiKeyDisabledReason[index])
+	const prefix = "status_code="
+	if !strings.HasPrefix(reason, prefix) {
+		return 0
+	}
+	value := strings.TrimPrefix(reason, prefix)
+	if separator := strings.IndexByte(value, ','); separator >= 0 {
+		value = value[:separator]
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || code < 100 || code > 599 {
+		return 0
+	}
+	return code
 }
 
 func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
@@ -547,46 +576,72 @@ func (channel *Channel) Insert() error {
 }
 
 func (channel *Channel) Update() error {
-	// If this is a multi-key channel, recalculate MultiKeySize based on the current key list to avoid inconsistency after editing keys
-	if channel.ChannelInfo.IsMultiKey {
-		var keyStr string
-		if channel.Key != "" {
-			keyStr = channel.Key
-		} else {
-			// If key is not provided, read the existing key from the database
-			if existing, err := GetChannelById(channel.Id, true); err == nil {
-				keyStr = existing.Key
-			}
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var current Channel
+		if err := lockForUpdate(tx).Where("id = ?", channel.Id).First(&current).Error; err != nil {
+			return err
 		}
-		// Parse the key list (supports newline separation or JSON array)
-		keys := []string{}
-		if keyStr != "" {
-			trimmed := strings.TrimSpace(keyStr)
-			if strings.HasPrefix(trimmed, "[") {
-				var arr []json.RawMessage
-				if err := common.Unmarshal([]byte(trimmed), &arr); err == nil {
-					keys = make([]string, len(arr))
-					for i, v := range arr {
-						keys[i] = string(v)
+		if current.ChannelInfo.IsMultiKey &&
+			current.ChannelInfo.MultiKeyGenerationCounter != channel.ChannelInfo.MultiKeyGenerationCounter {
+			return errors.New("渠道密钥状态已变化，请刷新后重试")
+		}
+		if current.ChannelInfo.IsMultiKey || channel.ChannelInfo.IsMultiKey {
+			currentGeneration := current.ChannelInfo.MultiKeyGenerationCounter
+			for _, generation := range current.ChannelInfo.MultiKeyDisabledGeneration {
+				if generation > currentGeneration {
+					currentGeneration = generation
+				}
+			}
+			channel.ChannelInfo.MultiKeyGenerationCounter = currentGeneration + 1
+		}
+
+		// 多密钥渠道更新时基于锁定后的最新密钥计算长度，避免旧快照覆盖并发状态。
+		if channel.ChannelInfo.IsMultiKey {
+			keyStr := channel.Key
+			if keyStr == "" {
+				keyStr = current.Key
+			}
+			keys := []string{}
+			if keyStr != "" {
+				trimmed := strings.TrimSpace(keyStr)
+				if strings.HasPrefix(trimmed, "[") {
+					var arr []json.RawMessage
+					if err := common.Unmarshal([]byte(trimmed), &arr); err == nil {
+						keys = make([]string, len(arr))
+						for i, value := range arr {
+							keys[i] = string(value)
+						}
+					}
+				}
+				if len(keys) == 0 {
+					keys = strings.Split(strings.Trim(keyStr, "\n"), "\n")
+				}
+			}
+			channel.ChannelInfo.MultiKeySize = len(keys)
+			if channel.ChannelInfo.MultiKeyStatusList != nil {
+				for idx := range channel.ChannelInfo.MultiKeyStatusList {
+					if idx >= channel.ChannelInfo.MultiKeySize {
+						delete(channel.ChannelInfo.MultiKeyStatusList, idx)
 					}
 				}
 			}
-			if len(keys) == 0 { // fallback to newline split
-				keys = strings.Split(strings.Trim(keyStr, "\n"), "\n")
+			if channel.ChannelInfo.MultiKeyDisabledStatusCode != nil {
+				for idx := range channel.ChannelInfo.MultiKeyDisabledStatusCode {
+					if idx >= channel.ChannelInfo.MultiKeySize {
+						delete(channel.ChannelInfo.MultiKeyDisabledStatusCode, idx)
+					}
+				}
 			}
-		}
-		channel.ChannelInfo.MultiKeySize = len(keys)
-		// Clean up status data that exceeds the new key count to prevent index out of range
-		if channel.ChannelInfo.MultiKeyStatusList != nil {
-			for idx := range channel.ChannelInfo.MultiKeyStatusList {
-				if idx >= channel.ChannelInfo.MultiKeySize {
-					delete(channel.ChannelInfo.MultiKeyStatusList, idx)
+			if channel.ChannelInfo.MultiKeyDisabledGeneration != nil {
+				for idx := range channel.ChannelInfo.MultiKeyDisabledGeneration {
+					if idx >= channel.ChannelInfo.MultiKeySize {
+						delete(channel.ChannelInfo.MultiKeyDisabledGeneration, idx)
+					}
 				}
 			}
 		}
-	}
-	var err error
-	err = DB.Model(channel).Updates(channel).Error
+		return tx.Model(channel).Updates(channel).Error
+	})
 	if err != nil {
 		return err
 	}
@@ -625,8 +680,6 @@ func (channel *Channel) Delete() error {
 	return err
 }
 
-var channelStatusLock sync.Mutex
-
 // channelPollingLocks stores locks for each channel.id to ensure thread-safe polling
 var channelPollingLocks sync.Map
 
@@ -661,10 +714,17 @@ func CleanupChannelPollingLocks() {
 	})
 }
 
-func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason string) {
+func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason string, disabledStatusCode int) bool {
+	if status == common.ChannelStatusAutoDisabled && channel.Status == common.ChannelStatusManuallyDisabled {
+		return false
+	}
 	keys := channel.GetKeys()
 	if len(keys) == 0 {
+		if channel.Status == status {
+			return false
+		}
 		channel.Status = status
+		return true
 	} else {
 		keyIndex := -1
 		for i, key := range keys {
@@ -676,20 +736,43 @@ func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason
 		if keyIndex < 0 {
 			if usingKey != "" {
 				common.SysLog(fmt.Sprintf("failed to update multi-key status: channel_id=%d, using key not found", channel.Id))
-				return
+				return false
+			}
+			if channel.Status == status {
+				return false
 			}
 			channel.Status = status
 			info := channel.GetOtherInfo()
 			info["status_reason"] = reason
 			info["status_time"] = common.GetTimestamp()
 			channel.SetOtherInfo(info)
-			return
+			return true
+		}
+		currentKeyStatus := common.ChannelStatusEnabled
+		if savedStatus, exists := channel.ChannelInfo.MultiKeyStatusList[keyIndex]; exists {
+			currentKeyStatus = savedStatus
+		}
+		// 在途请求的自动禁用结果不得覆盖管理员刚设置的手动禁用状态。
+		if status == common.ChannelStatusAutoDisabled && currentKeyStatus == common.ChannelStatusManuallyDisabled {
+			return false
 		}
 		if channel.ChannelInfo.MultiKeyStatusList == nil {
 			channel.ChannelInfo.MultiKeyStatusList = make(map[int]int)
 		}
 		if status == common.ChannelStatusEnabled {
 			delete(channel.ChannelInfo.MultiKeyStatusList, keyIndex)
+			if channel.ChannelInfo.MultiKeyDisabledReason != nil {
+				delete(channel.ChannelInfo.MultiKeyDisabledReason, keyIndex)
+			}
+			if channel.ChannelInfo.MultiKeyDisabledTime != nil {
+				delete(channel.ChannelInfo.MultiKeyDisabledTime, keyIndex)
+			}
+			if channel.ChannelInfo.MultiKeyDisabledStatusCode != nil {
+				delete(channel.ChannelInfo.MultiKeyDisabledStatusCode, keyIndex)
+			}
+			if channel.ChannelInfo.MultiKeyDisabledGeneration != nil {
+				delete(channel.ChannelInfo.MultiKeyDisabledGeneration, keyIndex)
+			}
 		} else {
 			channel.ChannelInfo.MultiKeyStatusList[keyIndex] = status
 			if channel.ChannelInfo.MultiKeyDisabledReason == nil {
@@ -700,6 +783,28 @@ func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason
 			}
 			channel.ChannelInfo.MultiKeyDisabledReason[keyIndex] = reason
 			channel.ChannelInfo.MultiKeyDisabledTime[keyIndex] = common.GetTimestamp()
+			if status == common.ChannelStatusAutoDisabled && disabledStatusCode >= 100 && disabledStatusCode <= 599 {
+				if channel.ChannelInfo.MultiKeyDisabledStatusCode == nil {
+					channel.ChannelInfo.MultiKeyDisabledStatusCode = make(map[int]int)
+				}
+				channel.ChannelInfo.MultiKeyDisabledStatusCode[keyIndex] = disabledStatusCode
+			} else if channel.ChannelInfo.MultiKeyDisabledStatusCode != nil {
+				delete(channel.ChannelInfo.MultiKeyDisabledStatusCode, keyIndex)
+			}
+			if status == common.ChannelStatusAutoDisabled {
+				if channel.ChannelInfo.MultiKeyDisabledGeneration == nil {
+					channel.ChannelInfo.MultiKeyDisabledGeneration = make(map[int]int64)
+				}
+				for _, generation := range channel.ChannelInfo.MultiKeyDisabledGeneration {
+					if generation > channel.ChannelInfo.MultiKeyGenerationCounter {
+						channel.ChannelInfo.MultiKeyGenerationCounter = generation
+					}
+				}
+				channel.ChannelInfo.MultiKeyGenerationCounter++
+				channel.ChannelInfo.MultiKeyDisabledGeneration[keyIndex] = channel.ChannelInfo.MultiKeyGenerationCounter
+			} else if channel.ChannelInfo.MultiKeyDisabledGeneration != nil {
+				delete(channel.ChannelInfo.MultiKeyDisabledGeneration, keyIndex)
+			}
 		}
 		if !hasEnabledMultiKey(keys, channel.ChannelInfo.MultiKeyStatusList) {
 			channel.Status = common.ChannelStatusAutoDisabled
@@ -711,6 +816,7 @@ func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason
 			channel.Status = common.ChannelStatusEnabled
 		}
 	}
+	return true
 }
 
 func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
@@ -732,9 +838,19 @@ type MultiKeyRecoveryResult struct {
 	ChannelEnabled bool
 }
 
+// MultiKeyRecoveryCandidate 保存发起网络测试前的自动禁用事件快照。
+// 恢复时必须逐项比对，避免旧测试结果覆盖测试期间发生的新一轮自动禁用。
+type MultiKeyRecoveryCandidate struct {
+	Key                string
+	DisabledReason     string
+	DisabledTime       int64
+	DisabledStatusCode int
+	DisabledGeneration int64
+}
+
 // RecoverAutoDisabledMultiKeys 按测试时记录的索引和密钥文本恢复自动禁用密钥。
 // 写回前重新锁定并校验当前渠道，避免覆盖测试期间发生的密钥编辑或手动禁用操作。
-func RecoverAutoDisabledMultiKeys(channelID int, candidates map[int]string) (MultiKeyRecoveryResult, error) {
+func RecoverAutoDisabledMultiKeys(channelID int, candidates map[int]MultiKeyRecoveryCandidate) (MultiKeyRecoveryResult, error) {
 	result := MultiKeyRecoveryResult{}
 	if len(candidates) == 0 {
 		return result, nil
@@ -755,11 +871,17 @@ func RecoverAutoDisabledMultiKeys(channelID int, candidates map[int]string) (Mul
 
 		keys := channel.GetKeys()
 		statusList := channel.ChannelInfo.MultiKeyStatusList
-		for index, expectedKey := range candidates {
-			if index < 0 || index >= len(keys) || keys[index] != expectedKey {
+		for index, candidate := range candidates {
+			if index < 0 || index >= len(keys) || keys[index] != candidate.Key {
 				continue
 			}
 			if statusList == nil || statusList[index] != common.ChannelStatusAutoDisabled {
+				continue
+			}
+			if channel.ChannelInfo.MultiKeyDisabledReason[index] != candidate.DisabledReason ||
+				channel.ChannelInfo.MultiKeyDisabledTime[index] != candidate.DisabledTime ||
+				channel.ChannelInfo.MultiKeyDisabledStatusCode[index] != candidate.DisabledStatusCode ||
+				channel.ChannelInfo.MultiKeyDisabledGeneration[index] != candidate.DisabledGeneration {
 				continue
 			}
 
@@ -769,6 +891,12 @@ func RecoverAutoDisabledMultiKeys(channelID int, candidates map[int]string) (Mul
 			}
 			if channel.ChannelInfo.MultiKeyDisabledTime != nil {
 				delete(channel.ChannelInfo.MultiKeyDisabledTime, index)
+			}
+			if channel.ChannelInfo.MultiKeyDisabledStatusCode != nil {
+				delete(channel.ChannelInfo.MultiKeyDisabledStatusCode, index)
+			}
+			if channel.ChannelInfo.MultiKeyDisabledGeneration != nil {
+				delete(channel.ChannelInfo.MultiKeyDisabledGeneration, index)
 			}
 			result.Recovered++
 		}
@@ -785,12 +913,24 @@ func RecoverAutoDisabledMultiKeys(channelID int, candidates map[int]string) (Mul
 		if len(channel.ChannelInfo.MultiKeyDisabledTime) == 0 {
 			channel.ChannelInfo.MultiKeyDisabledTime = nil
 		}
+		if len(channel.ChannelInfo.MultiKeyDisabledStatusCode) == 0 {
+			channel.ChannelInfo.MultiKeyDisabledStatusCode = nil
+		}
+		if len(channel.ChannelInfo.MultiKeyDisabledGeneration) == 0 {
+			channel.ChannelInfo.MultiKeyDisabledGeneration = nil
+		}
 
 		beforeStatus := channel.Status
 		if channel.Status == common.ChannelStatusAutoDisabled && hasEnabledMultiKey(keys, channel.ChannelInfo.MultiKeyStatusList) {
 			channel.Status = common.ChannelStatusEnabled
 			result.ChannelEnabled = true
 		}
+		for _, generation := range channel.ChannelInfo.MultiKeyDisabledGeneration {
+			if generation > channel.ChannelInfo.MultiKeyGenerationCounter {
+				channel.ChannelInfo.MultiKeyGenerationCounter = generation
+			}
+		}
+		channel.ChannelInfo.MultiKeyGenerationCounter++
 
 		if err := tx.Model(&Channel{}).Where("id = ?", channelID).Updates(map[string]any{
 			"status":       channel.Status,
@@ -842,76 +982,73 @@ func UpdateMultiKeyTestIndex(channelID int, nextIndex int) error {
 }
 
 func UpdateChannelStatus(channelId int, usingKey string, status int, reason string) bool {
-	if common.MemoryCacheEnabled {
-		channelStatusLock.Lock()
-		defer channelStatusLock.Unlock()
+	return updateChannelStatus(channelId, usingKey, status, reason, 0)
+}
 
-		channelCache, _ := CacheGetChannel(channelId)
-		if channelCache == nil {
-			return false
-		}
-		if channelCache.ChannelInfo.IsMultiKey {
-			// Use per-channel lock to prevent concurrent map read/write with GetNextEnabledKey
-			beforeStatus := channelCache.Status
-			pollingLock := GetChannelPollingLock(channelId)
-			pollingLock.Lock()
-			// 如果是多Key模式，更新缓存中的状态
-			handlerMultiKeyUpdate(channelCache, usingKey, status, reason)
-			pollingLock.Unlock()
-			if beforeStatus != channelCache.Status {
-				CacheUpdateChannelStatus(channelId, channelCache.Status)
-			}
-			//CacheUpdateChannel(channelCache)
-			//return true
-		} else {
-			// 如果缓存渠道存在，且状态已是目标状态，直接返回
-			if channelCache.Status == status {
-				return false
-			}
-			CacheUpdateChannelStatus(channelId, status)
-		}
-	}
+// UpdateChannelStatusWithDisabledStatusCode 在自动禁用密钥时额外保存原始 HTTP 状态码。
+func UpdateChannelStatusWithDisabledStatusCode(channelId int, usingKey string, status int, reason string, disabledStatusCode int) bool {
+	return updateChannelStatus(channelId, usingKey, status, reason, disabledStatusCode)
+}
 
-	shouldUpdateAbilities := false
-	defer func() {
-		if shouldUpdateAbilities {
-			err := UpdateAbilityStatus(channelId, status == common.ChannelStatusEnabled)
-			if err != nil {
-				common.SysLog(fmt.Sprintf("failed to update ability status: channel_id=%d, error=%v", channelId, err))
-			}
+func updateChannelStatus(channelId int, usingKey string, status int, reason string, disabledStatusCode int) bool {
+	pollingLock := GetChannelPollingLock(channelId)
+	pollingLock.Lock()
+	defer pollingLock.Unlock()
+
+	var channel Channel
+	beforeStatus := 0
+	changed := false
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).Where("id = ?", channelId).First(&channel).Error; err != nil {
+			return err
 		}
-	}()
-	channel, err := GetChannelById(channelId, true)
-	if err != nil {
-		return false
-	} else {
-		if channel.Status == status {
-			return false
-		}
+		beforeStatus = channel.Status
 
 		if channel.ChannelInfo.IsMultiKey {
-			beforeStatus := channel.Status
-			// Protect map writes with the same per-channel lock used by readers
-			pollingLock := GetChannelPollingLock(channelId)
-			pollingLock.Lock()
-			handlerMultiKeyUpdate(channel, usingKey, status, reason)
-			pollingLock.Unlock()
-			if beforeStatus != channel.Status {
-				shouldUpdateAbilities = true
+			beforeGeneration := channel.ChannelInfo.MultiKeyGenerationCounter
+			if !handlerMultiKeyUpdate(&channel, usingKey, status, reason, disabledStatusCode) {
+				return nil
+			}
+			if channel.ChannelInfo.MultiKeyGenerationCounter == beforeGeneration {
+				channel.ChannelInfo.MultiKeyGenerationCounter++
 			}
 		} else {
+			if channel.Status == status {
+				return nil
+			}
 			info := channel.GetOtherInfo()
 			info["status_reason"] = reason
 			info["status_time"] = common.GetTimestamp()
 			channel.SetOtherInfo(info)
 			channel.Status = status
-			shouldUpdateAbilities = true
 		}
-		err = channel.SaveWithoutKey()
-		if err != nil {
-			common.SysLog(fmt.Sprintf("failed to update channel status: channel_id=%d, status=%d, error=%v", channel.Id, status, err))
-			return false
+
+		changed = true
+		if err := tx.Omit("key").Save(&channel).Error; err != nil {
+			return err
 		}
+		if beforeStatus != channel.Status {
+			return tx.Model(&Ability{}).Where("channel_id = ?", channelId).
+				Select("enabled").Update("enabled", channel.Status == common.ChannelStatusEnabled).Error
+		}
+		return nil
+	})
+	if err != nil {
+		common.SysLog(fmt.Sprintf("failed to update channel status: channel_id=%d, status=%d, error=%v", channelId, status, err))
+		return false
+	}
+	if !changed {
+		return false
+	}
+
+	if common.MemoryCacheEnabled {
+		if cached, err := CacheGetChannel(channelId); err == nil && cached != nil {
+			channel.ChannelInfo.MultiKeyPollingIndex = cached.ChannelInfo.MultiKeyPollingIndex
+		}
+		if beforeStatus != channel.Status {
+			CacheUpdateChannelStatus(channelId, channel.Status)
+		}
+		CacheUpdateChannel(&channel)
 	}
 	return true
 }
