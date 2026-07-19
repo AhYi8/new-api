@@ -768,7 +768,7 @@ try {
             ForEach-Object { ($_ -split '\s+')[1] } |
             Sort-Object -Unique
     )
-    $baseImageProbeDockerfile = Join-Path $temporaryRoot 'Dockerfile.base-image-probe'
+    $baseImageProbeDockerfile = Join-Path $buildContext 'Dockerfile.base-image-probe'
     foreach ($baseImage in $baseImages) {
         # 使用实际发布构建器预热多架构缓存，避免Docker宿主镜像存储无法用同一清单摘要同时保存不同平台。
         [System.IO.File]::WriteAllText($baseImageProbeDockerfile, "FROM $baseImage`n", (New-Object System.Text.UTF8Encoding($false)))
