@@ -29,7 +29,7 @@ func DisableChannel(channelError types.ChannelError, reason string, statusCode i
 	if success {
 		subject := fmt.Sprintf("通道「%s」（#%d）已被禁用", channelError.ChannelName, channelError.ChannelId)
 		content := fmt.Sprintf("通道「%s」（#%d）已被禁用，原因：%s", channelError.ChannelName, channelError.ChannelId, reason)
-		NotifyRootUser(formatNotifyType(channelError.ChannelId, common.ChannelStatusAutoDisabled), subject, content)
+		notifyRootUserChannelUpdate(common.ChannelStatusAutoDisabled, formatNotifyType(channelError.ChannelId, common.ChannelStatusAutoDisabled), subject, content)
 	}
 }
 
@@ -44,7 +44,7 @@ func EnableChannel(channelId int, usingKey string, channelName string) {
 func NotifyChannelEnabled(channelId int, channelName string) {
 	subject := fmt.Sprintf("通道「%s」（#%d）已被启用", channelName, channelId)
 	content := fmt.Sprintf("通道「%s」（#%d）已被启用", channelName, channelId)
-	NotifyRootUser(formatNotifyType(channelId, common.ChannelStatusEnabled), subject, content)
+	notifyRootUserChannelUpdate(common.ChannelStatusEnabled, formatNotifyType(channelId, common.ChannelStatusEnabled), subject, content)
 }
 
 func ShouldDisableChannel(err *types.NewAPIError) bool {

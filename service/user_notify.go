@@ -14,10 +14,50 @@ import (
 )
 
 func NotifyRootUser(t string, subject string, content string) {
-	user := model.GetRootUser().ToBaseUser()
-	err := NotifyUser(user.Id, user.Email, user.GetSetting(), dto.NewNotify(t, subject, content, nil))
+	user, ok := getRootUserForNotification()
+	if !ok {
+		return
+	}
+	setting := user.GetSetting()
+	notifyRootUser(user, setting, t, subject, content)
+}
+
+func notifyRootUserChannelUpdate(status int, t string, subject string, content string) {
+	user, ok := getRootUserForNotification()
+	if !ok {
+		return
+	}
+	setting := user.GetSetting()
+	if !shouldNotifyRootUserChannelUpdate(setting, status) {
+		return
+	}
+	notifyRootUser(user, setting, t, subject, content)
+}
+
+func shouldNotifyRootUserChannelUpdate(setting dto.UserSetting, status int) bool {
+	switch status {
+	case common.ChannelStatusAutoDisabled:
+		return setting.IsChannelAutoDisableNotifyEnabled()
+	case common.ChannelStatusEnabled:
+		return setting.IsChannelAutoRecoveryNotifyEnabled()
+	default:
+		return true
+	}
+}
+
+func getRootUserForNotification() (*model.User, bool) {
+	user := model.GetRootUser()
+	if user == nil || user.Id == 0 {
+		common.SysLog("通知Root用户失败：未找到Root用户")
+		return nil, false
+	}
+	return user, true
+}
+
+func notifyRootUser(user *model.User, setting dto.UserSetting, t string, subject string, content string) {
+	err := NotifyUser(user.Id, user.Email, setting, dto.NewNotify(t, subject, content, nil))
 	if err != nil {
-		common.SysLog(fmt.Sprintf("failed to notify root user: %s", err.Error()))
+		common.SysLog(fmt.Sprintf("通知Root用户失败：%s", err.Error()))
 	}
 }
 

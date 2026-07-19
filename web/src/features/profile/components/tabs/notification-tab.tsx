@@ -67,6 +67,7 @@ interface NotificationTabProps {
 export function NotificationTab({ profile, onUpdate }: NotificationTabProps) {
   const { t } = useTranslation()
   const isAdmin = (profile?.role ?? 0) >= ROLE.ADMIN
+  const isRoot = profile?.role === ROLE.SUPER_ADMIN
   const [loading, setLoading] = useState(false)
   const [settings, setSettings] = useState<UserSettings>({
     notify_type: 'email',
@@ -81,6 +82,8 @@ export function NotificationTab({ profile, onUpdate }: NotificationTabProps) {
     accept_unset_model_ratio_model: false,
     record_ip_log: false,
     upstream_model_update_notify_enabled: false,
+    channel_auto_disable_notify_enabled: true,
+    channel_auto_recovery_notify_enabled: true,
   })
 
   // Update form field helper
@@ -110,6 +113,10 @@ export function NotificationTab({ profile, onUpdate }: NotificationTabProps) {
         record_ip_log: parsed.record_ip_log || false,
         upstream_model_update_notify_enabled:
           parsed.upstream_model_update_notify_enabled || false,
+        channel_auto_disable_notify_enabled:
+          parsed.channel_auto_disable_notify_enabled ?? true,
+        channel_auto_recovery_notify_enabled:
+          parsed.channel_auto_recovery_notify_enabled ?? true,
       })
     }
   }, [profile])
@@ -125,7 +132,7 @@ export function NotificationTab({ profile, onUpdate }: NotificationTabProps) {
       } else {
         toast.error(response.message || t('Failed to update settings'))
       }
-    } catch (_error) {
+    } catch {
       toast.error(t('Failed to update settings'))
     } finally {
       setLoading(false)
@@ -143,8 +150,9 @@ export function NotificationTab({ profile, onUpdate }: NotificationTabProps) {
           value={[notifyType]}
           onValueChange={(value) => {
             const nextValue = value.find((item) => item !== notifyType)
-            if (nextValue)
+            if (nextValue) {
               updateField('notify_type', normalizeNotifyType(nextValue))
+            }
           }}
           aria-label={t('Notification Method')}
           variant='outline'
@@ -331,6 +339,62 @@ export function NotificationTab({ profile, onUpdate }: NotificationTabProps) {
             {t('Configure your account behavior preferences')}
           </p>
         </div>
+
+        {isRoot && (
+          <>
+            <div className='flex items-start justify-between gap-3 rounded-lg border p-3 sm:items-center sm:p-4'>
+              <div className='space-y-0.5'>
+                <Label htmlFor='channelAutoDisableNotify'>
+                  {t('Automatic Disable Notifications')}
+                </Label>
+                <p
+                  id='channelAutoDisableNotifyDescription'
+                  className='text-muted-foreground text-xs sm:text-sm'
+                >
+                  {t(
+                    'Notify through the selected method whenever a channel or multi-key credential is automatically disabled.'
+                  )}
+                </p>
+              </div>
+              <Switch
+                id='channelAutoDisableNotify'
+                className='shrink-0'
+                aria-describedby='channelAutoDisableNotifyDescription'
+                disabled={loading}
+                checked={settings.channel_auto_disable_notify_enabled}
+                onCheckedChange={(checked) =>
+                  updateField('channel_auto_disable_notify_enabled', checked)
+                }
+              />
+            </div>
+
+            <div className='flex items-start justify-between gap-3 rounded-lg border p-3 sm:items-center sm:p-4'>
+              <div className='space-y-0.5'>
+                <Label htmlFor='channelAutoRecoveryNotify'>
+                  {t('Automatic Recovery Notifications')}
+                </Label>
+                <p
+                  id='channelAutoRecoveryNotifyDescription'
+                  className='text-muted-foreground text-xs sm:text-sm'
+                >
+                  {t(
+                    'Notify through the selected method when an automatically disabled channel becomes available again.'
+                  )}
+                </p>
+              </div>
+              <Switch
+                id='channelAutoRecoveryNotify'
+                className='shrink-0'
+                aria-describedby='channelAutoRecoveryNotifyDescription'
+                disabled={loading}
+                checked={settings.channel_auto_recovery_notify_enabled}
+                onCheckedChange={(checked) =>
+                  updateField('channel_auto_recovery_notify_enabled', checked)
+                }
+              />
+            </div>
+          </>
+        )}
 
         {/* Receive Upstream Model Update Notifications (admin only) */}
         {isAdmin && (
