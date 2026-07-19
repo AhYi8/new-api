@@ -768,17 +768,16 @@ try {
             ForEach-Object { ($_ -split '\s+')[1] } |
             Sort-Object -Unique
     )
-    $baseImageProbeDockerfile = Join-Path $buildContext 'Dockerfile.base-image-probe'
     foreach ($baseImage in $baseImages) {
         # 使用实际发布构建器预热多架构缓存，避免Docker宿主镜像存储无法用同一清单摘要同时保存不同平台。
-        [System.IO.File]::WriteAllText($baseImageProbeDockerfile, "FROM $baseImage`n", (New-Object System.Text.UTF8Encoding($false)))
         Write-Host (Get-Message -Key 'PullingBaseImage' -Values @($baseImage, $publishPlatforms))
         Push-Location $buildContext
         try {
             Invoke-NativeCommandWithRetry -Command 'docker' -Arguments @(
                 'buildx', 'build',
                 '--builder', $builderName,
-                '--file', 'Dockerfile.base-image-probe',
+                '--file', 'scripts/Dockerfile.base-image-probe',
+                '--build-arg', "BASE_IMAGE=$baseImage",
                 '--platform', $publishPlatforms,
                 '--output', 'type=cacheonly',
                 '.'
@@ -788,7 +787,6 @@ try {
             Pop-Location
         }
     }
-    Remove-Item -LiteralPath $baseImageProbeDockerfile -Force
 
     Write-Host (Get-Message -Key 'RunningAutomatedTests')
     Invoke-NativeCommandWithRetry -Command 'docker' -Arguments ($commonBuildArguments + @(
