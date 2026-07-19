@@ -1342,6 +1342,8 @@ type UpdateUserSettingRequest struct {
 	GotifyToken                      string  `json:"gotify_token,omitempty"`
 	GotifyPriority                   int     `json:"gotify_priority,omitempty"`
 	UpstreamModelUpdateNotifyEnabled *bool   `json:"upstream_model_update_notify_enabled,omitempty"`
+	ChannelAutoDisableNotifyEnabled  *bool   `json:"channel_auto_disable_notify_enabled,omitempty"`
+	ChannelAutoRecoveryNotifyEnabled *bool   `json:"channel_auto_recovery_notify_enabled,omitempty"`
 	AcceptUnsetModelRatioModel       bool    `json:"accept_unset_model_ratio_model"`
 	RecordIpLog                      bool    `json:"record_ip_log"`
 }
@@ -1438,26 +1440,35 @@ func UpdateUserSetting(c *gin.Context) {
 	if user.Role >= common.RoleAdminUser && req.UpstreamModelUpdateNotifyEnabled != nil {
 		upstreamModelUpdateNotifyEnabled = *req.UpstreamModelUpdateNotifyEnabled
 	}
-
-	// 构建设置
-	settings := dto.UserSetting{
-		NotifyType:                       req.QuotaWarningType,
-		QuotaWarningThreshold:            req.QuotaWarningThreshold,
-		UpstreamModelUpdateNotifyEnabled: upstreamModelUpdateNotifyEnabled,
-		AcceptUnsetRatioModel:            req.AcceptUnsetModelRatioModel,
-		RecordIpLog:                      req.RecordIpLog,
+	channelAutoDisableNotifyEnabled := existingSettings.ChannelAutoDisableNotifyEnabled
+	channelAutoRecoveryNotifyEnabled := existingSettings.ChannelAutoRecoveryNotifyEnabled
+	if user.Role == common.RoleRootUser {
+		if req.ChannelAutoDisableNotifyEnabled != nil {
+			channelAutoDisableNotifyEnabled = req.ChannelAutoDisableNotifyEnabled
+		}
+		if req.ChannelAutoRecoveryNotifyEnabled != nil {
+			channelAutoRecoveryNotifyEnabled = req.ChannelAutoRecoveryNotifyEnabled
+		}
 	}
+
+	// 基于现有设置更新本接口负责的字段，避免保存通知选项时清空其他偏好和媒介配置。
+	settings := existingSettings
+	settings.NotifyType = req.QuotaWarningType
+	settings.QuotaWarningThreshold = req.QuotaWarningThreshold
+	settings.UpstreamModelUpdateNotifyEnabled = upstreamModelUpdateNotifyEnabled
+	settings.ChannelAutoDisableNotifyEnabled = channelAutoDisableNotifyEnabled
+	settings.ChannelAutoRecoveryNotifyEnabled = channelAutoRecoveryNotifyEnabled
+	settings.AcceptUnsetRatioModel = req.AcceptUnsetModelRatioModel
+	settings.RecordIpLog = req.RecordIpLog
 
 	// 如果是webhook类型,添加webhook相关设置
 	if req.QuotaWarningType == dto.NotifyTypeWebhook {
 		settings.WebhookUrl = req.WebhookUrl
-		if req.WebhookSecret != "" {
-			settings.WebhookSecret = req.WebhookSecret
-		}
+		settings.WebhookSecret = req.WebhookSecret
 	}
 
-	// 如果提供了通知邮箱，添加到设置中
-	if req.QuotaWarningType == dto.NotifyTypeEmail && req.NotificationEmail != "" {
+	// 邮箱为空时保留为空，表示回退到用户主邮箱。
+	if req.QuotaWarningType == dto.NotifyTypeEmail {
 		settings.NotificationEmail = req.NotificationEmail
 	}
 
