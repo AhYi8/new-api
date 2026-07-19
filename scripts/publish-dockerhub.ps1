@@ -281,6 +281,46 @@ function Test-DockerHubNetwork {
     }
 }
 
+function Test-BuildxDockerHubNetwork {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BuilderName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Image,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Platforms
+    )
+
+    $probeRoot = Join-Path ([System.IO.Path]::GetTempPath()) "new-api-buildx-network-probe-$([Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $probeRoot -Force | Out-Null
+    $probeDockerfile = Join-Path $probeRoot 'Dockerfile'
+    [System.IO.File]::WriteAllText($probeDockerfile, "FROM $Image`n", (New-Object System.Text.UTF8Encoding($false)))
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & docker buildx build `
+            --builder $BuilderName `
+            --file $probeDockerfile `
+            --platform $Platforms `
+            --pull `
+            --output type=cacheonly `
+            $probeRoot *> $null
+        return $LASTEXITCODE -eq 0
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        $resolvedProbeRoot = [System.IO.Path]::GetFullPath($probeRoot)
+        $resolvedSystemTemp = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+        $expectedPrefix = $resolvedSystemTemp + [System.IO.Path]::DirectorySeparatorChar + 'new-api-buildx-network-probe-'
+        if ($resolvedProbeRoot.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $resolvedProbeRoot -Recurse -Force
+        }
+    }
+}
+
 function Get-PublicIPv4Address {
     param(
         [Parameter(Mandatory = $true)]
@@ -503,6 +543,17 @@ try {
     Invoke-NativeCommand -Command 'docker' -Arguments @('version')
     Invoke-NativeCommand -Command 'docker' -Arguments @('buildx', 'version')
 
+    $dockerInfo = Get-NativeOutput -Command 'docker' -Arguments @('info', '--format', '{{json .}}') | ConvertFrom-Json
+    $daemonHttpProxy = [string]$dockerInfo.HttpProxy
+    $daemonHttpsProxy = [string]$dockerInfo.HttpsProxy
+    $daemonNoProxy = [string]$dockerInfo.NoProxy
+    if ($daemonHttpProxy -and $daemonHttpProxy -notmatch '^[a-z][a-z0-9+.-]*://') {
+        $daemonHttpProxy = "http://$daemonHttpProxy"
+    }
+    if ($daemonHttpsProxy -and $daemonHttpsProxy -notmatch '^[a-z][a-z0-9+.-]*://') {
+        $daemonHttpsProxy = "http://$daemonHttpsProxy"
+    }
+
     if (-not (Test-DockerHubCredential)) {
         throw (Get-Message -Key 'DockerHubCredentialMissing')
     }
@@ -518,7 +569,51 @@ try {
         throw (Get-Message -Key 'RepositoryIsPrivate' -Values @($imagePath))
     }
 
-    if (-not (Test-DockerHubNetwork -ImagePath $imagePath)) {
+    $useDockerHubProxy = -not (Test-DockerHubNetwork -ImagePath $imagePath)
+    if (-not $useDockerHubProxy) {
+        $existingBuilder = @(Get-BuildxBuilderNames)
+        if ($existingBuilder -contains $builderName -and ($daemonHttpProxy -or $daemonHttpsProxy -or $daemonNoProxy)) {
+            $builderContainerName = "buildx_buildkit_$($builderName)0"
+            $builderEnvironment = Get-NativeOutput -Command 'docker' -Arguments @('inspect', '--format', '{{json .Config.Env}}', $builderContainerName)
+            $builderProxyMismatch =
+                ($daemonHttpProxy -and $builderEnvironment -notmatch [Regex]::Escape("HTTP_PROXY=$daemonHttpProxy")) -or
+                ($daemonHttpsProxy -and $builderEnvironment -notmatch [Regex]::Escape("HTTPS_PROXY=$daemonHttpsProxy")) -or
+                ($daemonNoProxy -and $builderEnvironment -notmatch [Regex]::Escape("NO_PROXY=$daemonNoProxy"))
+            if ($builderProxyMismatch) {
+                Write-Host '检测到Docker守护进程代理与Buildx构建器不一致，正在重建构建器...'
+                Invoke-NativeCommand -Command 'docker' -Arguments @('buildx', 'rm', $builderName)
+                $existingBuilder = @()
+            }
+        }
+        if ($existingBuilder -notcontains $builderName) {
+            Write-Host (Get-Message -Key 'CreatingBuilder' -Values @($builderName))
+            $builderArguments = @(
+                'buildx', 'create', '--name', $builderName,
+                '--driver', 'docker-container'
+            )
+            if ($daemonHttpProxy) {
+                $builderArguments += @('--driver-opt', "env.HTTP_PROXY=$daemonHttpProxy")
+            }
+            if ($daemonHttpsProxy) {
+                $builderArguments += @('--driver-opt', "env.HTTPS_PROXY=$daemonHttpsProxy")
+            }
+            if ($daemonNoProxy) {
+                $builderArguments += @('--driver-opt', "env.NO_PROXY=$daemonNoProxy")
+            }
+            $builderArguments += '--bootstrap'
+            Invoke-NativeCommand -Command 'docker' -Arguments $builderArguments
+        }
+
+        $networkProbeImage = Get-Content -LiteralPath (Join-Path $repositoryRoot 'Dockerfile') |
+            Where-Object { $_ -match '^FROM\s+' } |
+            ForEach-Object { ($_ -split '\s+')[1] } |
+            Select-Object -First 1
+        if (-not (Test-BuildxDockerHubNetwork -BuilderName $builderName -Image $networkProbeImage -Platforms $publishPlatforms)) {
+            $useDockerHubProxy = $true
+        }
+    }
+
+    if ($useDockerHubProxy) {
         Write-Host (Get-Message -Key 'DockerHubNetworkFallback')
         $authAddress = Get-PublicIPv4Address -HostName 'auth.docker.io'
         $registryAddress = Get-PublicIPv4Address -HostName 'registry-1.docker.io'
@@ -596,17 +691,6 @@ try {
             )
         }
     }
-    else {
-        $existingBuilder = @(Get-BuildxBuilderNames)
-        if ($existingBuilder -notcontains $builderName) {
-            Write-Host (Get-Message -Key 'CreatingBuilder' -Values @($builderName))
-            Invoke-NativeCommand -Command 'docker' -Arguments @(
-                'buildx', 'create', '--name', $builderName,
-                '--driver', 'docker-container',
-                '--bootstrap'
-            )
-        }
-    }
 
     Write-Host (Get-Message -Key 'PreparingBuilder' -Values @($builderName))
     $builderDetails = Get-NativeOutput -Command 'docker' -Arguments @('buildx', 'inspect', $builderName, '--bootstrap')
@@ -680,12 +764,21 @@ try {
             ForEach-Object { ($_ -split '\s+')[1] } |
             Sort-Object -Unique
     )
+    $baseImageProbeDockerfile = Join-Path $temporaryRoot 'Dockerfile.base-image-probe'
     foreach ($baseImage in $baseImages) {
-        foreach ($targetPlatform in @('linux/amd64', 'linux/arm64')) {
-            Write-Host (Get-Message -Key 'PullingBaseImage' -Values @($baseImage, $targetPlatform))
-            Invoke-NativeCommandWithRetry -Command 'docker' -Arguments @('pull', '--platform', $targetPlatform, $baseImage)
-        }
+        # 使用实际发布构建器预热多架构缓存，避免Docker宿主镜像存储无法用同一清单摘要同时保存不同平台。
+        [System.IO.File]::WriteAllText($baseImageProbeDockerfile, "FROM $baseImage`n", (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host (Get-Message -Key 'PullingBaseImage' -Values @($baseImage, $publishPlatforms))
+        Invoke-NativeCommandWithRetry -Command 'docker' -Arguments @(
+            'buildx', 'build',
+            '--builder', $builderName,
+            '--file', $baseImageProbeDockerfile,
+            '--platform', $publishPlatforms,
+            '--output', 'type=cacheonly',
+            $buildContext
+        )
     }
+    Remove-Item -LiteralPath $baseImageProbeDockerfile -Force
 
     Write-Host (Get-Message -Key 'RunningAutomatedTests')
     Invoke-NativeCommandWithRetry -Command 'docker' -Arguments ($commonBuildArguments + @(
