@@ -773,14 +773,20 @@ try {
         # 使用实际发布构建器预热多架构缓存，避免Docker宿主镜像存储无法用同一清单摘要同时保存不同平台。
         [System.IO.File]::WriteAllText($baseImageProbeDockerfile, "FROM $baseImage`n", (New-Object System.Text.UTF8Encoding($false)))
         Write-Host (Get-Message -Key 'PullingBaseImage' -Values @($baseImage, $publishPlatforms))
-        Invoke-NativeCommandWithRetry -Command 'docker' -Arguments @(
-            'buildx', 'build',
-            '--builder', $builderName,
-            '--file', $baseImageProbeDockerfile,
-            '--platform', $publishPlatforms,
-            '--output', 'type=cacheonly',
-            $buildContext
-        )
+        Push-Location $buildContext
+        try {
+            Invoke-NativeCommandWithRetry -Command 'docker' -Arguments @(
+                'buildx', 'build',
+                '--builder', $builderName,
+                '--file', 'Dockerfile.base-image-probe',
+                '--platform', $publishPlatforms,
+                '--output', 'type=cacheonly',
+                '.'
+            )
+        }
+        finally {
+            Pop-Location
+        }
     }
     Remove-Item -LiteralPath $baseImageProbeDockerfile -Force
 
