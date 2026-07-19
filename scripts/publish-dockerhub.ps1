@@ -621,7 +621,9 @@ try {
 
         $existingProxy = Get-NativeOutput -Command 'docker' -Arguments @('ps', '--all', '--quiet', '--filter', "name=^/$proxyContainerName$")
         if ($existingProxy) {
-            $existingLabel = Get-NativeOutput -Command 'docker' -Arguments @('inspect', '--format', '{{index .Config.Labels "com.ahyi.new-api.release-proxy"}}', $proxyContainerName)
+            $existingLabelsJson = Get-NativeOutput -Command 'docker' -Arguments @('inspect', '--format', '{{json .Config.Labels}}', $proxyContainerName)
+            $existingLabels = $existingLabelsJson | ConvertFrom-Json
+            $existingLabel = $existingLabels.'com.ahyi.new-api.release-proxy'
             if ($existingLabel -ne 'true') {
                 throw (Get-Message -Key 'ProxyContainerConflict' -Values @($proxyContainerName))
             }
@@ -633,7 +635,9 @@ try {
             Invoke-NativeCommand -Command 'docker' -Arguments @('network', 'create', '--label', 'com.ahyi.new-api.release-proxy=true', $proxyNetworkName)
         }
         else {
-            $networkLabel = Get-NativeOutput -Command 'docker' -Arguments @('network', 'inspect', '--format', '{{index .Labels "com.ahyi.new-api.release-proxy"}}', $proxyNetworkName)
+            $networkLabelsJson = Get-NativeOutput -Command 'docker' -Arguments @('network', 'inspect', '--format', '{{json .Labels}}', $proxyNetworkName)
+            $networkLabels = $networkLabelsJson | ConvertFrom-Json
+            $networkLabel = $networkLabels.'com.ahyi.new-api.release-proxy'
             if ($networkLabel -ne 'true') {
                 throw (Get-Message -Key 'ProxyNetworkConflict' -Values @($proxyNetworkName))
             }
