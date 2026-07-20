@@ -171,6 +171,64 @@ export interface GetChannelResponse {
   data?: Channel
 }
 
+export interface ChannelAggregationCandidate {
+  id: number
+  name: string
+  status: number
+  is_multi_key: boolean
+  key_count: number
+  eligible: boolean
+  disabled_reason?: string
+}
+
+export interface ChannelAggregationGroup {
+  type: number
+  base_url: string
+  eligible: boolean
+  disabled_reason?: string
+  channels: ChannelAggregationCandidate[]
+}
+
+export interface ChannelAggregationGroupsResponse {
+  success: boolean
+  message?: string
+  data?: {
+    groups: ChannelAggregationGroup[]
+  }
+}
+
+export interface ChannelAggregationDraft {
+  source_ids: number[]
+  sources: Array<{ id: number; name: string }>
+  type: number
+  base_url: string
+  key: string
+  key_count: number
+  snapshot_token: string
+}
+
+export interface ChannelAggregationPrepareResponse {
+  success: boolean
+  message?: string
+  data?: ChannelAggregationDraft
+}
+
+export interface ChannelAggregationRequest {
+  source_ids: number[]
+  snapshot_token: string
+  multi_key_mode: 'random' | 'polling'
+  channel: Partial<Channel>
+}
+
+export interface ChannelAggregationResultResponse {
+  success: boolean
+  message?: string
+  data?: {
+    channel_id: number
+    deleted_count: number
+  }
+}
+
 export interface ChannelOpsResponse {
   success: boolean
   message?: string

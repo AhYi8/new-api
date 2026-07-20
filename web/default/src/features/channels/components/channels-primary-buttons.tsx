@@ -29,6 +29,7 @@ import {
   SortAsc,
   RefreshCw,
   ArrowUpFromLine,
+  Combine,
 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -56,6 +57,7 @@ import {
   ADMIN_PERMISSION_RESOURCES,
   hasPermission,
 } from '@/lib/admin-permissions'
+import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
 import {
@@ -89,6 +91,7 @@ export function ChannelsPrimaryButtons() {
     ADMIN_PERMISSION_RESOURCES.CHANNEL,
     ADMIN_PERMISSION_ACTIONS.SENSITIVE_WRITE
   )
+  const canAggregateChannels = currentUser?.role === ROLE.SUPER_ADMIN
 
   const handleTagModeToggle = (checked: boolean) => {
     localStorage.setItem('enable-tag-mode', String(checked))
@@ -171,6 +174,18 @@ export function ChannelsPrimaryButtons() {
           )}
         </Tooltip>
 
+        {canAggregateChannels && (
+          <Button
+            variant='outline'
+            size='sm'
+            className='max-sm:hidden'
+            onClick={() => setOpen('aggregate-channels')}
+          >
+            <Combine className='h-4 w-4' />
+            {t('Aggregate')}
+          </Button>
+        )}
+
         {/* More Actions */}
         <DropdownMenu>
           <DropdownMenuTrigger render={<Button variant='outline' size='sm' />}>
@@ -206,6 +221,21 @@ export function ChannelsPrimaryButtons() {
             </DropdownMenuCheckboxItem>
 
             <DropdownMenuSeparator className='sm:hidden' />
+
+            {canAggregateChannels && (
+              <>
+                <DropdownMenuItem
+                  className='sm:hidden'
+                  onClick={() => setOpen('aggregate-channels')}
+                >
+                  {t('Aggregate Channels')}
+                  <DropdownMenuShortcut>
+                    <Combine className='h-4 w-4' />
+                  </DropdownMenuShortcut>
+                </DropdownMenuItem>
+                <DropdownMenuSeparator className='sm:hidden' />
+              </>
+            )}
 
             <DropdownMenuItem
               onClick={() => {

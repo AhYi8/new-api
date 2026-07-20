@@ -28,7 +28,7 @@ import React, {
 
 import { useChannelUpstreamUpdates } from '../hooks/use-channel-upstream-updates'
 import { channelsQueryKeys } from '../lib'
-import type { Channel } from '../types'
+import type { Channel, ChannelAggregationDraft } from '../types'
 
 // ============================================================================
 // Types
@@ -45,6 +45,8 @@ type DialogType =
   | 'tag-batch-edit'
   | 'edit-tag'
   | 'copy-channel'
+  | 'aggregate-channels'
+  | 'aggregate-channel'
   | null
 
 type UpstreamUpdateState = ReturnType<typeof useChannelUpstreamUpdates>
@@ -64,6 +66,8 @@ type ChannelsContextType = {
   setBatchMode: (enabled: boolean) => void
   sensitiveVisible: boolean
   setSensitiveVisible: (visible: boolean) => void
+  aggregationDraft: ChannelAggregationDraft | null
+  setAggregationDraft: (draft: ChannelAggregationDraft | null) => void
   upstream: UpstreamUpdateState
 }
 
@@ -91,6 +95,8 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
   })
   const [batchMode, setBatchMode] = useState(false)
   const [sensitiveVisible, setSensitiveVisible] = useState(true)
+  const [aggregationDraft, setAggregationDraft] =
+    useState<ChannelAggregationDraft | null>(null)
 
   const queryClient = useQueryClient()
   const refreshChannels = useCallback(async () => {
@@ -117,6 +123,8 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
       setBatchMode,
       sensitiveVisible,
       setSensitiveVisible,
+      aggregationDraft,
+      setAggregationDraft,
       upstream,
     }),
     [
@@ -127,6 +135,7 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
       idSort,
       batchMode,
       sensitiveVisible,
+      aggregationDraft,
       upstream,
     ]
   )

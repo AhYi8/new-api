@@ -24,6 +24,10 @@ import type {
   BatchDeleteParams,
   BatchSetTagParams,
   Channel,
+  ChannelAggregationGroupsResponse,
+  ChannelAggregationPrepareResponse,
+  ChannelAggregationRequest,
+  ChannelAggregationResultResponse,
   ChannelBalanceResponse,
   ChannelOpsResponse,
   ChannelTestResponse,
@@ -301,6 +305,36 @@ export async function getChannelKey(
   const res = await api.post(
     `/api/channel/${id}/key`,
     payload,
+    channelActionConfig()
+  )
+  return res.data
+}
+
+export async function getChannelAggregationGroups(): Promise<ChannelAggregationGroupsResponse> {
+  const res = await api.get(
+    '/api/channel/aggregation/groups',
+    channelActionConfig()
+  )
+  return res.data
+}
+
+export async function prepareChannelAggregation(
+  sourceIds: number[]
+): Promise<ChannelAggregationPrepareResponse> {
+  const res = await api.post(
+    '/api/channel/aggregation/prepare',
+    { source_ids: sourceIds },
+    channelActionConfig()
+  )
+  return res.data
+}
+
+export async function aggregateChannels(
+  data: ChannelAggregationRequest
+): Promise<ChannelAggregationResultResponse> {
+  const res = await api.post(
+    '/api/channel/aggregation',
+    data,
     channelActionConfig()
   )
   return res.data

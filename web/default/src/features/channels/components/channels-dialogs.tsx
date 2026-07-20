@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useChannels } from './channels-provider'
 import { BalanceQueryDialog } from './dialogs/balance-query-dialog'
+import { ChannelAggregationDialog } from './dialogs/channel-aggregation-dialog'
 import { ChannelTestDialog } from './dialogs/channel-test-dialog'
 import { CopyChannelDialog } from './dialogs/copy-channel-dialog'
 import { EditTagDialog } from './dialogs/edit-tag-dialog'
@@ -26,10 +27,18 @@ import { MultiKeyManageDialog } from './dialogs/multi-key-manage-dialog'
 import { OllamaModelsDialog } from './dialogs/ollama-models-dialog'
 import { TagBatchEditDialog } from './dialogs/tag-batch-edit-dialog'
 import { UpstreamUpdateDialog } from './dialogs/upstream-update-dialog'
+import { ChannelAggregateDrawer } from './drawers/channel-aggregate-drawer'
 import { ChannelMutateDrawer } from './drawers/channel-mutate-drawer'
 
 export function ChannelsDialogs() {
-  const { open, setOpen, currentRow, upstream } = useChannels()
+  const {
+    open,
+    setOpen,
+    currentRow,
+    aggregationDraft,
+    setAggregationDraft,
+    upstream,
+  } = useChannels()
 
   return (
     <>
@@ -38,6 +47,21 @@ export function ChannelsDialogs() {
         open={open === 'create-channel' || open === 'update-channel'}
         onOpenChange={(v) => !v && setOpen(null)}
         currentRow={open === 'update-channel' ? currentRow : null}
+      />
+
+      <ChannelAggregationDialog
+        open={open === 'aggregate-channels'}
+        onOpenChange={(v) => !v && setOpen(null)}
+      />
+
+      <ChannelAggregateDrawer
+        open={open === 'aggregate-channel'}
+        draft={aggregationDraft}
+        onOpenChange={(v) => {
+          if (v) return
+          setAggregationDraft(null)
+          setOpen(null)
+        }}
       />
 
       {/* Test Channel Dialog */}
