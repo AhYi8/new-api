@@ -55,6 +55,7 @@ import { type SubmitErrorHandler, useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   sideDrawerContentClassName,
   sideDrawerFooterClassName,
@@ -145,6 +146,7 @@ import {
   FIELD_PLACEHOLDERS,
   MODEL_FETCHABLE_TYPES,
 } from '../../constants'
+import { useChannelAggregationForm } from '../../hooks/use-channel-aggregation-form'
 import { useChannelMutateForm } from '../../hooks/use-channel-mutate-form'
 import {
   CHANNEL_FORM_DEFAULT_VALUES,
@@ -170,7 +172,7 @@ import {
   collectInvalidStatusCodeEntries,
   collectNewDisallowedStatusCodeRedirects,
 } from '../../lib/status-code-risk-guard'
-import type { Channel } from '../../types'
+import type { Channel, ChannelAggregationDraft } from '../../types'
 import { useChannels } from '../channels-provider'
 import { AdvancedCustomEditorDialog } from '../dialogs/advanced-custom-editor-dialog'
 import { FetchModelsDialog } from '../dialogs/fetch-models-dialog'
@@ -194,6 +196,7 @@ type ChannelMutateDrawerProps = {
   open: boolean
   onOpenChange: (open: boolean) => void
   currentRow?: Channel | null
+  aggregationDraft?: ChannelAggregationDraft | null
 }
 
 type ModelMappingGuardrail = {
@@ -601,10 +604,11 @@ export function ChannelMutateDrawer({
   open,
   onOpenChange,
   currentRow,
+  aggregationDraft = null,
 }: ChannelMutateDrawerProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const { setOpen } = useChannels()
+  const { setOpen, setAggregationDraft } = useChannels()
   const currentUser = useAuthStore((s) => s.auth.user)
   const canEditSensitive = hasPermission(
     currentUser,
@@ -612,6 +616,7 @@ export function ChannelMutateDrawer({
     ADMIN_PERMISSION_ACTIONS.SENSITIVE_WRITE
   )
   const canRevealChannelKey = currentUser?.role === ROLE.SUPER_ADMIN
+  const isAggregation = aggregationDraft !== null
   const [fetchModelsDialogOpen, setFetchModelsDialogOpen] = useState(false)
   const [channelKey, setChannelKey] = useState<string | null>(null)
   const [isChannelKeyLoading, setIsChannelKeyLoading] = useState(false)
@@ -646,6 +651,9 @@ export function ChannelMutateDrawer({
     useState(false)
   const [clipboardConnectionInfo, setClipboardConnectionInfo] =
     useState<ChannelConnectionInfo | null>(null)
+  const [aggregationConfirmOpen, setAggregationConfirmOpen] = useState(false)
+  const [pendingAggregationData, setPendingAggregationData] =
+    useState<ChannelFormValues | null>(null)
 
   const isEditing = Boolean(currentRow)
   const channelId = currentRow?.id ?? null
@@ -816,7 +824,7 @@ export function ChannelMutateDrawer({
   }, [applyConnectionInfo, t])
 
   useEffect(() => {
-    if (!open || isEditing) {
+    if (!open || isEditing || isAggregation) {
       setClipboardConnectionInfo(null)
       return
     }
@@ -839,7 +847,7 @@ export function ChannelMutateDrawer({
     return () => {
       cancelled = true
     }
-  }, [isEditing, open])
+  }, [isAggregation, isEditing, open])
 
   // Helper computed values
   const isBatchMode =
@@ -847,6 +855,10 @@ export function ChannelMutateDrawer({
   const isChannelDetailLoading = isEditing && isChannelLoading
   const supportsMultiKeyAddMode =
     currentType !== 57 && !(currentType === 41 && vertexKeyType === 'api_key')
+  const showVolcEnginePresetBaseURL =
+    currentType === 45 && !doubaoApiEditUnlocked && !isAggregation
+  const showVolcEngineCustomBaseURL =
+    currentType === 45 && (doubaoApiEditUnlocked || isAggregation)
   const addModeOptions = useMemo(
     () =>
       supportsMultiKeyAddMode
@@ -1234,7 +1246,20 @@ export function ChannelMutateDrawer({
 
   // Load channel data into form when editing
   useEffect(() => {
-    if (isEditing && channelData?.data) {
+    if (isAggregation && aggregationDraft) {
+      form.reset({
+        ...CHANNEL_FORM_DEFAULT_VALUES,
+        type: aggregationDraft.type,
+        base_url: aggregationDraft.base_url,
+        key: aggregationDraft.key,
+        multi_key_mode: 'multi_to_single',
+        multi_key_type: 'random',
+      })
+      setAdvancedSettingsOpen(false)
+      initialModelsRef.current = []
+      initialModelMappingRef.current = ''
+      initialStatusCodeMappingRef.current = ''
+    } else if (isEditing && channelData?.data) {
       const defaults = transformChannelToFormDefaults(channelData.data)
       form.reset(defaults)
       setAdvancedSettingsOpen(
@@ -1254,11 +1279,11 @@ export function ChannelMutateDrawer({
       initialModelMappingRef.current = ''
       initialStatusCodeMappingRef.current = ''
     }
-  }, [isEditing, channelData, form])
+  }, [aggregationDraft, isAggregation, isEditing, channelData, form])
 
   // Handle type change - set default values for specific types
   useEffect(() => {
-    if (isEditing) return // Don't auto-set defaults when editing
+    if (isEditing || isAggregation) return // 聚合字段来自已验证草稿，禁止类型默认值覆盖。
 
     // Type 45 (VolcEngine) - set default base_url
     if (currentType === 45) {
@@ -1275,26 +1300,33 @@ export function ChannelMutateDrawer({
         form.setValue('other', 'v2.1')
       }
     }
-  }, [currentType, isEditing, form])
+  }, [currentType, isAggregation, isEditing, form])
 
   useEffect(() => {
-    if (currentType !== 45 || currentBaseUrl !== 'doubao-coding-plan') return
+    // 聚合地址来自已验证来源，不能套用普通新建表单的预设地址转换。
+    if (
+      isAggregation ||
+      currentType !== 45 ||
+      currentBaseUrl !== 'doubao-coding-plan'
+    ) {
+      return
+    }
 
     form.setValue('base_url', 'https://ark.cn-beijing.volces.com', {
       shouldDirty: false,
       shouldValidate: true,
     })
-  }, [currentBaseUrl, currentType, form])
+  }, [currentBaseUrl, currentType, form, isAggregation])
 
   useEffect(() => {
-    if (isEditing || supportsMultiKeyAddMode) return
+    if (isEditing || isAggregation || supportsMultiKeyAddMode) return
     if (multiKeyMode && multiKeyMode !== 'single') {
       form.setValue('multi_key_mode', 'single', {
         shouldDirty: true,
         shouldValidate: true,
       })
     }
-  }, [form, isEditing, multiKeyMode, supportsMultiKeyAddMode])
+  }, [form, isAggregation, isEditing, multiKeyMode, supportsMultiKeyAddMode])
 
   // Validate base_url - warn if it ends with /v1
   useEffect(() => {
@@ -1549,6 +1581,14 @@ export function ChannelMutateDrawer({
     setOpen(null)
   }, [channelId, queryClient, onOpenChange, setOpen])
 
+  const handleAggregationSuccess = useCallback(() => {
+    setPendingAggregationData(null)
+    setAggregationConfirmOpen(false)
+    setAggregationDraft(null)
+    onOpenChange(false)
+    setOpen(null)
+  }, [onOpenChange, setAggregationDraft, setOpen])
+
   // Show missing models confirmation dialog
   const confirmMissingModelMappings = useCallback(
     (missingModels: string[]): Promise<MissingModelsAction> => {
@@ -1608,7 +1648,13 @@ export function ChannelMutateDrawer({
     onSuccess: handleSuccess,
   })
 
-  const isSubmitting = channelMutation.isPending
+  const aggregationMutation = useChannelAggregationForm({
+    draft: aggregationDraft,
+    onSuccess: handleAggregationSuccess,
+  })
+
+  const isSubmitting =
+    channelMutation.isPending || aggregationMutation.isPending
 
   // Submit handler
   const onSubmit = useCallback(
@@ -1709,6 +1755,12 @@ export function ChannelMutateDrawer({
         }
       }
 
+      if (isAggregation) {
+        setPendingAggregationData(data)
+        setAggregationConfirmOpen(true)
+        return
+      }
+
       await channelMutation.mutateAsync(data)
     },
     [
@@ -1718,9 +1770,36 @@ export function ChannelMutateDrawer({
       confirmMissingModelMappings,
       confirmStatusCodeRisk,
       channelMutation,
+      isAggregation,
       t,
     ]
   )
+
+  const handleAggregationConfirm = useCallback(async () => {
+    if (!pendingAggregationData || !aggregationDraft) return
+
+    setAggregationConfirmOpen(false)
+    try {
+      await withVerification(
+        () => aggregationMutation.mutateAsync(pendingAggregationData),
+        {
+          preferredMethod: 'passkey',
+          title: t('Verify channel aggregation'),
+          description: t(
+            'Use Passkey or 2FA to confirm creating the aggregate channel and deleting its source channels.'
+          ),
+        }
+      )
+    } catch {
+      // mutation 与安全验证组件已负责展示具体错误，保留表单以便重试。
+    }
+  }, [
+    aggregationDraft,
+    aggregationMutation,
+    pendingAggregationData,
+    t,
+    withVerification,
+  ])
 
   const handleAdvancedSettingsOpenChange = useCallback((nextOpen: boolean) => {
     if (!nextOpen) {
@@ -1846,6 +1925,25 @@ export function ChannelMutateDrawer({
     [onOpenChange, form]
   )
 
+  let drawerTitle = t('Create Channel')
+  let drawerDescription = t(
+    'Add a new channel by providing the necessary information.'
+  )
+  let submitLabel = t('Save changes')
+  if (isAggregation) {
+    drawerTitle = t('Aggregate Channels')
+    drawerDescription = t(
+      'Review the verified keys, complete the new channel settings, and save to finish aggregation.'
+    )
+    submitLabel = t('Create Aggregate Channel')
+  } else if (isEditing) {
+    drawerTitle = t('Edit Channel')
+    drawerDescription = t(
+      "Update channel configuration and click save when you're done."
+    )
+    submitLabel = t('Update Channel')
+  }
+
   return (
     <>
       <Sheet open={open} onOpenChange={handleOpenChange}>
@@ -1858,23 +1956,17 @@ export function ChannelMutateDrawer({
                     <ChannelTypeLogo type={currentType} size={22} />
                   </IconBadge>
                   <span>
-                    {isEditing ? t('Edit Channel') : t('Create Channel')}
+                    {drawerTitle}
                     <span className='text-muted-foreground ml-2 text-sm font-normal'>
                       {t(currentTypeLabel)}
                     </span>
                   </span>
                 </SheetTitle>
                 <SheetDescription className='mt-1'>
-                  {isEditing
-                    ? t(
-                        "Update channel configuration and click save when you're done."
-                      )
-                    : t(
-                        'Add a new channel by providing the necessary information.'
-                      )}
+                  {drawerDescription}
                 </SheetDescription>
               </div>
-              {!isEditing && (
+              {!isEditing && !isAggregation && (
                 <Button
                   type='button'
                   variant='outline'
@@ -1902,7 +1994,7 @@ export function ChannelMutateDrawer({
             </Alert>
           )}
 
-          {!isEditing && clipboardConnectionInfo && (
+          {!isEditing && !isAggregation && clipboardConnectionInfo && (
             <Alert>
               <AlertDescription className='flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between'>
                 <span>{t('Connection info detected in clipboard')}</span>
@@ -1960,7 +2052,7 @@ export function ChannelMutateDrawer({
                       <ChannelBasicSection>
                         <div className='grid gap-4 sm:grid-cols-2'>
                           <fieldset
-                            disabled={sensitiveLocked}
+                            disabled={sensitiveLocked || isAggregation}
                             className='min-w-0 disabled:opacity-60'
                           >
                             <FormField
@@ -2000,11 +2092,15 @@ export function ChannelMutateDrawer({
                                       />
                                     </div>
                                   </FormControl>
-                                  {sensitiveLocked && (
+                                  {(sensitiveLocked || isAggregation) && (
                                     <FormDescription>
-                                      {t(
-                                        'No permission to perform this action'
-                                      )}
+                                      {isAggregation
+                                        ? t(
+                                            'Channel type is fixed for aggregation'
+                                          )
+                                        : t(
+                                            'No permission to perform this action'
+                                          )}
                                     </FormDescription>
                                   )}
                                   <FormMessage />
@@ -2115,6 +2211,16 @@ export function ChannelMutateDrawer({
                           </Alert>
                         )}
 
+                        {isAggregation && (
+                          <Alert className='border-blue-200 bg-blue-50 text-blue-900 dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-50'>
+                            <AlertDescription>
+                              {t(
+                                'Channel type, API address, keys, and multi-key mode are locked to the verified aggregation sources.'
+                              )}
+                            </AlertDescription>
+                          </Alert>
+                        )}
+
                         <div className='border-border/60 bg-muted/10 rounded-lg border p-4'>
                           <fieldset
                             disabled={sensitiveLocked}
@@ -2136,6 +2242,7 @@ export function ChannelMutateDrawer({
                                           placeholder={t(
                                             'e.g., https://docs-test-001.openai.azure.com'
                                           )}
+                                          disabled={isAggregation}
                                           {...field}
                                         />
                                       </FormControl>
@@ -2214,6 +2321,7 @@ export function ChannelMutateDrawer({
                                         placeholder={t(
                                           'e.g., https://api.openai.com/v1/chat/completions'
                                         )}
+                                        disabled={isAggregation}
                                         {...field}
                                       />
                                     </FormControl>
@@ -2381,6 +2489,7 @@ export function ChannelMutateDrawer({
                                         placeholder={t(
                                           'e.g., https://fastgpt.run/api/openapi'
                                         )}
+                                        disabled={isAggregation}
                                         {...field}
                                       />
                                     </FormControl>
@@ -2412,6 +2521,7 @@ export function ChannelMutateDrawer({
                                         placeholder={t(
                                           'e.g., https://api.example.com (path before /suno)'
                                         )}
+                                        disabled={isAggregation}
                                         {...field}
                                       />
                                     </FormControl>
@@ -2482,6 +2592,7 @@ export function ChannelMutateDrawer({
                                         {t('Vertex AI Key Format')}
                                       </FormLabel>
                                       <Select
+                                        disabled={isAggregation}
                                         items={[
                                           { value: 'json', label: t('JSON') },
                                           {
@@ -2533,6 +2644,7 @@ export function ChannelMutateDrawer({
                                         type='file'
                                         accept='.json,application/json'
                                         multiple={isBatchMode}
+                                        disabled={isAggregation}
                                         onChange={async (e) => {
                                           const fileList = e.target.files
                                           const files = fileList
@@ -2640,7 +2752,7 @@ export function ChannelMutateDrawer({
                             )}
 
                             {/* VolcEngine (type 45) */}
-                            {currentType === 45 && !doubaoApiEditUnlocked && (
+                            {showVolcEnginePresetBaseURL && (
                               <FormField
                                 control={form.control}
                                 name='base_url'
@@ -2709,7 +2821,7 @@ export function ChannelMutateDrawer({
                             )}
 
                             {/* VolcEngine (type 45) - Custom API URL (unlocked) */}
-                            {currentType === 45 && doubaoApiEditUnlocked && (
+                            {showVolcEngineCustomBaseURL && (
                               <FormField
                                 control={form.control}
                                 name='base_url'
@@ -2721,6 +2833,7 @@ export function ChannelMutateDrawer({
                                         placeholder={t(
                                           'e.g., https://ark.cn-beijing.volces.com'
                                         )}
+                                        disabled={isAggregation}
                                         {...field}
                                       />
                                     </FormControl>
@@ -2769,6 +2882,7 @@ export function ChannelMutateDrawer({
                                         placeholder={t(
                                           FIELD_PLACEHOLDERS.BASE_URL
                                         )}
+                                        disabled={isAggregation}
                                         {...field}
                                       />
                                     </FormControl>
@@ -2866,6 +2980,7 @@ export function ChannelMutateDrawer({
                                         {t('Add Mode')}
                                       </FormLabel>
                                       <Select
+                                        disabled={isAggregation}
                                         items={addModeOptions.map((option) => ({
                                           value: option.value,
                                           label: t(option.label),
@@ -2981,13 +3096,14 @@ export function ChannelMutateDrawer({
                                         <Textarea
                                           placeholder={keyPlaceholder}
                                           rows={isBatchMode ? 8 : 4}
+                                          readOnly={isAggregation}
                                           {...field}
                                         />
                                       </FormControl>
                                       <FormDescription>
                                         <div className='flex flex-col gap-2'>
                                           <span>{keyDescription}</span>
-                                          {isBatchMode && (
+                                          {isBatchMode && !isAggregation && (
                                             <Button
                                               type='button'
                                               variant='outline'
@@ -4658,7 +4774,7 @@ export function ChannelMutateDrawer({
               {isSubmitting && (
                 <Loader2 className='mr-2 h-4 w-4 animate-spin' />
               )}
-              {isEditing ? t('Update Channel') : t('Save changes')}
+              {submitLabel}
             </Button>
           </SheetFooter>
         </SheetContent>
@@ -4747,6 +4863,31 @@ export function ChannelMutateDrawer({
         detailItems={statusCodeRiskDetailItems}
         onConfirm={() => handleStatusCodeRiskAction(true)}
       />
+
+      <ConfirmDialog
+        open={aggregationConfirmOpen}
+        onOpenChange={setAggregationConfirmOpen}
+        title={t('Create aggregate channel and delete sources?')}
+        desc={t(
+          'The new channel will be created first, then {{count}} source channels will be deleted in the same transaction.',
+          { count: aggregationDraft?.sources.length ?? 0 }
+        )}
+        confirmText={t('Create and delete sources')}
+        destructive
+        isLoading={aggregationMutation.isPending}
+        handleConfirm={() => void handleAggregationConfirm()}
+      >
+        <div className='bg-muted/40 max-h-48 overflow-y-auto rounded-md border p-3'>
+          <p className='mb-2 text-sm font-medium'>{t('Source channels')}</p>
+          <ul className='text-muted-foreground space-y-1 text-sm'>
+            {aggregationDraft?.sources.map((source) => (
+              <li key={source.id}>
+                #{source.id} {source.name}
+              </li>
+            ))}
+          </ul>
+        </div>
+      </ConfirmDialog>
     </>
   )
 }

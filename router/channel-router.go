@@ -27,6 +27,25 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 		middleware.SecureVerificationRequired(),
 		controller.GetChannelKey,
 	)
+	channelRoute.GET("/aggregation/groups",
+		middleware.RootAuth(),
+		middleware.DisableCache(),
+		controller.GetChannelAggregationGroups,
+	)
+	channelRoute.POST("/aggregation/prepare",
+		middleware.RootAuth(),
+		middleware.CriticalRateLimit(),
+		middleware.DisableCache(),
+		middleware.SecureVerificationRequired(),
+		controller.PrepareChannelAggregation,
+	)
+	channelRoute.POST("/aggregation",
+		middleware.RootAuth(),
+		middleware.CriticalRateLimit(),
+		middleware.DisableCache(),
+		middleware.SecureVerificationRequired(),
+		controller.AggregateChannels,
+	)
 
 	for _, route := range channelPermissionRoutes {
 		channelRoute.Handle(route.method, route.path,

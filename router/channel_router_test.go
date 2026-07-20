@@ -37,6 +37,25 @@ func TestChannelStatusRoutesRegisterWithoutConflict(t *testing.T) {
 	})
 }
 
+func TestChannelAggregationRoutesRegisterWithoutConflict(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	api := engine.Group("/api")
+
+	require.NotPanics(t, func() {
+		registerChannelRoutes(api)
+	})
+
+	routes := engine.Routes()
+	routeHandlers := make(map[string]string, len(routes))
+	for _, route := range routes {
+		routeHandlers[route.Method+" "+route.Path] = route.Handler
+	}
+	assert.Equal(t, "github.com/QuantumNous/new-api/controller.GetChannelAggregationGroups", routeHandlers[http.MethodGet+" /api/channel/aggregation/groups"])
+	assert.Equal(t, "github.com/QuantumNous/new-api/controller.PrepareChannelAggregation", routeHandlers[http.MethodPost+" /api/channel/aggregation/prepare"])
+	assert.Equal(t, "github.com/QuantumNous/new-api/controller.AggregateChannels", routeHandlers[http.MethodPost+" /api/channel/aggregation"])
+}
+
 func assertChannelRoutePermission(t *testing.T, method string, path string, permission authz.Permission, handler any) {
 	t.Helper()
 	for _, route := range channelPermissionRoutes {
