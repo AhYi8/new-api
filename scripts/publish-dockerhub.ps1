@@ -542,7 +542,7 @@ try {
 
     # 发布必须记录当前代码实际包含的官方基线，不能为了发布而隐式要求合并最新上游。
     $upstreamRevision = Get-NativeOutput -Command 'git' -Arguments @('merge-base', 'HEAD', 'upstream/main')
-    $upstreamBehindCount = Get-NativeOutput -Command 'git' -Arguments @('rev-list', '--count', "$upstreamRevision..upstream/main")
+    $upstreamBehindCount = Get-NativeOutput -Command 'git' -Arguments @('rev-list', '--count', "${upstreamRevision}..upstream/main")
     if ($upstreamBehindCount -ne '0') {
         Write-Warning (Get-Message -Key 'UpstreamUpdatesSkipped' -Values @($upstreamBehindCount, $upstreamRevision))
     }
