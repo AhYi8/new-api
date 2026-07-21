@@ -150,6 +150,7 @@ export function ChannelAggregationDialog(props: ChannelAggregationDialogProps) {
           setOpen('aggregate-channel')
         },
         {
+          scope: 'channel.key.read',
           preferredMethod: 'passkey',
           title: t('Verify to aggregate channel keys'),
           description: t(

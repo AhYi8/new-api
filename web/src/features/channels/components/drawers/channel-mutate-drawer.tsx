@@ -1783,6 +1783,7 @@ export function ChannelMutateDrawer({
       await withVerification(
         () => aggregationMutation.mutateAsync(pendingAggregationData),
         {
+          scope: 'channel.key.read',
           preferredMethod: 'passkey',
           title: t('Verify channel aggregation'),
           description: t(
