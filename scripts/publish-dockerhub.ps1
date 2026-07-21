@@ -657,11 +657,23 @@ try {
         )
         $proxyStarted = $true
 
-        $proxyPortOutput = Get-NativeOutput -Command 'docker' -Arguments @('port', $proxyContainerName, '8888/tcp')
-        if ($proxyPortOutput -notmatch ':(\d+)\s*$') {
+        # Docker Desktop 可能在容器启动后短暂返回空端口映射，等待映射稳定后再配置宿主机代理。
+        $proxyPortOutput = ''
+        $proxyHostPort = ''
+        for ($attempt = 1; $attempt -le 10; $attempt++) {
+            $proxyPortOutput = Get-NativeOutput -Command 'docker' -Arguments @('port', $proxyContainerName, '8888/tcp')
+            if ($proxyPortOutput -match ':(\d+)\s*$') {
+                $proxyHostPort = $Matches[1]
+                break
+            }
+            if ($attempt -lt 10) {
+                Start-Sleep -Milliseconds 500
+            }
+        }
+        if (-not $proxyHostPort) {
             throw (Get-Message -Key 'ProxyPortParseFailed' -Values @($proxyPortOutput))
         }
-        $script:HostProxyUri = "http://127.0.0.1:$($Matches[1])"
+        $script:HostProxyUri = "http://127.0.0.1:$proxyHostPort"
         $env:HTTP_PROXY = $script:HostProxyUri
         $env:HTTPS_PROXY = $script:HostProxyUri
 
