@@ -62,6 +62,8 @@ interface MultiSelectProps {
   id?: string
   /** Disable the entire control. */
   disabled?: boolean
+  /** 锁定已选值，但保留下拉查看与搜索能力。 */
+  readOnly?: boolean
   /**
    * Limits rendered chips while keeping all values selected.
    * Hidden values remain searchable/removable from the dropdown.
@@ -115,6 +117,7 @@ function splitDraft(value: string): { completed: string[]; draft: string } {
 export function MultiSelect(props: MultiSelectProps) {
   const { t } = useTranslation()
   const placeholder = props.placeholder ?? t('Select items...')
+  const readOnly = props.readOnly === true
 
   // Anchor the popup to the chips container so its width tracks the entire
   // input row, not just the leftover space at the end of wrapped chips.
@@ -149,6 +152,7 @@ export function MultiSelect(props: MultiSelectProps) {
       ))
 
   const canCreate =
+    !readOnly &&
     props.allowCreate === true &&
     trimmedInput.length > 0 &&
     !inputMatchesExisting
@@ -164,11 +168,12 @@ export function MultiSelect(props: MultiSelectProps) {
     if (canCreate) {
       set.add(trimmedInput)
     }
-    return Array.from(set)
+    return [...set]
   }, [props.options, props.selected, canCreate, trimmedInput])
 
   const addValues = React.useCallback(
     (values: string[]) => {
+      if (readOnly) return
       const next: string[] = []
       const seen = new Set<string>(props.selected)
       for (const raw of values) {
@@ -181,7 +186,7 @@ export function MultiSelect(props: MultiSelectProps) {
       if (next.length === 0) return
       props.onChange([...props.selected, ...next])
     },
-    [props]
+    [props, readOnly]
   )
 
   const handleInputValueChange = (value: string) => {
@@ -199,6 +204,7 @@ export function MultiSelect(props: MultiSelectProps) {
   }
 
   const handleValueChange = (next: string[]) => {
+    if (readOnly) return
     props.onChange(next)
     // When an item is picked (multiple mode), Base UI keeps the input but most
     // UX patterns clear it. Clearing once a value is added makes batch picking
@@ -260,6 +266,7 @@ export function MultiSelect(props: MultiSelectProps) {
       <ComboboxChips
         ref={chipsAnchorRef}
         className={cn('w-full', props.className)}
+        aria-readonly={readOnly}
       >
         <ComboboxValue>
           {(values: string[]) => {
@@ -283,7 +290,7 @@ export function MultiSelect(props: MultiSelectProps) {
                 {visibleValues.map((value) => {
                   const label = labelMap.get(value) ?? value
                   return (
-                    <ComboboxChip key={value}>
+                    <ComboboxChip key={value} showRemove={!readOnly}>
                       {props.copyChipOnClick ? (
                         <button
                           type='button'
@@ -308,6 +315,10 @@ export function MultiSelect(props: MultiSelectProps) {
                     onClick={(event) => {
                       event.preventDefault()
                       event.stopPropagation()
+                      if (readOnly) {
+                        setOpen(true)
+                        return
+                      }
                       setExpanded(true)
                     }}
                     onPointerDown={(event) => event.stopPropagation()}

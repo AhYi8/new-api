@@ -28,7 +28,11 @@ import React, {
 
 import { useChannelUpstreamUpdates } from '../hooks/use-channel-upstream-updates'
 import { channelsQueryKeys } from '../lib'
-import type { Channel, ChannelAggregationDraft } from '../types'
+import type {
+  Channel,
+  ChannelAggregationDraft,
+  ChannelAggregationPreparedData,
+} from '../types'
 
 // ============================================================================
 // Types
@@ -46,6 +50,7 @@ type DialogType =
   | 'edit-tag'
   | 'copy-channel'
   | 'aggregate-channels'
+  | 'aggregate-channel-config'
   | 'aggregate-channel'
   | null
 
@@ -68,6 +73,10 @@ type ChannelsContextType = {
   setSensitiveVisible: (visible: boolean) => void
   aggregationDraft: ChannelAggregationDraft | null
   setAggregationDraft: (draft: ChannelAggregationDraft | null) => void
+  aggregationPreparation: ChannelAggregationPreparedData | null
+  setAggregationPreparation: (
+    preparation: ChannelAggregationPreparedData | null
+  ) => void
   upstream: UpstreamUpdateState
 }
 
@@ -97,6 +106,8 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
   const [sensitiveVisible, setSensitiveVisible] = useState(true)
   const [aggregationDraft, setAggregationDraft] =
     useState<ChannelAggregationDraft | null>(null)
+  const [aggregationPreparation, setAggregationPreparation] =
+    useState<ChannelAggregationPreparedData | null>(null)
 
   const queryClient = useQueryClient()
   const refreshChannels = useCallback(async () => {
@@ -125,6 +136,8 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
       setSensitiveVisible,
       aggregationDraft,
       setAggregationDraft,
+      aggregationPreparation,
+      setAggregationPreparation,
       upstream,
     }),
     [
@@ -136,6 +149,7 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
       batchMode,
       sensitiveVisible,
       aggregationDraft,
+      aggregationPreparation,
       upstream,
     ]
   )

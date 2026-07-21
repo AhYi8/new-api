@@ -197,9 +197,26 @@ export interface ChannelAggregationGroupsResponse {
   }
 }
 
-export interface ChannelAggregationDraft {
+export interface ChannelAggregationSourceConfig {
+  id: number
+  name: string
+  openai_organization: string | null
+  test_model: string | null
+  weight: number | null
+  group: string
+  priority: number | null
+  auto_ban: number | null
+  tag: string | null
+  remark: string | null
+  other: string
+  proxy: string
+  models: string
+}
+
+export interface ChannelAggregationPreparedData {
   source_ids: number[]
   sources: Array<{ id: number; name: string }>
+  source_configs: ChannelAggregationSourceConfig[]
   type: number
   base_url: string
   key: string
@@ -207,10 +224,29 @@ export interface ChannelAggregationDraft {
   snapshot_token: string
 }
 
+export interface ChannelAggregationPrefill {
+  name: string
+  openai_organization: string
+  test_model: string
+  weight: number
+  group: string[]
+  priority: number
+  auto_ban: number
+  tag: string
+  remark: string
+  other: string
+  proxy: string
+  models: string
+}
+
+export interface ChannelAggregationDraft extends ChannelAggregationPreparedData {
+  prefill: ChannelAggregationPrefill
+}
+
 export interface ChannelAggregationPrepareResponse {
   success: boolean
   message?: string
-  data?: ChannelAggregationDraft
+  data?: ChannelAggregationPreparedData
 }
 
 export interface ChannelAggregationRequest {

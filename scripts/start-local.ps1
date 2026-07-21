@@ -1,13 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidateRange(1, 65535)]
-    [int]$Port = 3000,
-
-    [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$')]
-    [string]$ContainerName = 'new-api-local',
-
-    [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$')]
-    [string]$VolumeName = 'new-api-local-data',
+    [int]$Port = 13000,
 
     [ValidateRange(30, 1800)]
     [int]$StartupTimeoutSeconds = 600,
@@ -66,47 +60,6 @@ function Get-NativeOutput {
     return ($output | Out-String).Trim()
 }
 
-function Invoke-NativeCommandWithRetry {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Command,
-
-        [Parameter()]
-        [string[]]$Arguments = @(),
-
-        [Parameter()]
-        [int]$Attempts = 3,
-
-        [Parameter()]
-        [int]$DelaySeconds = 5
-    )
-
-    $nativeExitCode = 0
-    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
-        $previousErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try {
-            & $Command @Arguments
-            $nativeExitCode = $LASTEXITCODE
-        }
-        finally {
-            $ErrorActionPreference = $previousErrorActionPreference
-        }
-
-        if ($nativeExitCode -eq 0) {
-            return
-        }
-
-        if ($attempt -lt $Attempts) {
-            $delay = $DelaySeconds * $attempt
-            Write-Host (Get-Message -Key 'RetryingCommand' -Values @($delay, ($attempt + 1), $Attempts, $Command, ($Arguments -join ' ')))
-            Start-Sleep -Seconds $delay
-        }
-    }
-
-    throw (Get-Message -Key 'NativeCommandFailed' -Values @($nativeExitCode, $Command, ($Arguments -join ' ')))
-}
-
 function Test-EnvSetting {
     param(
         [Parameter(Mandatory = $true)]
@@ -127,33 +80,132 @@ function Test-EnvSetting {
     return $null -ne $value -and $value -ne '' -and $value -ne '""' -and $value -ne "''"
 }
 
-function Write-ContainerLogs {
+function Get-ManagedProcess {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Name
+        [string]$PidFile,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedExecutable
     )
 
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
+    if (-not (Test-Path -LiteralPath $PidFile)) {
+        return $null
+    }
+
+    $rawProcessId = (Get-Content -Raw -Encoding UTF8 -LiteralPath $PidFile).Trim()
+    $processId = 0
+    if (-not [int]::TryParse($rawProcessId, [ref]$processId) -or $processId -le 0) {
+        Remove-Item -LiteralPath $PidFile -Force
+        return $null
+    }
+
+    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if ($null -eq $process) {
+        Remove-Item -LiteralPath $PidFile -Force
+        return $null
+    }
+
     try {
-        & docker logs --tail 100 $Name 2>&1 | ForEach-Object { Write-Host $_ }
+        $actualExecutable = [System.IO.Path]::GetFullPath($process.Path)
+    }
+    catch {
+        throw (Get-Message -Key 'ManagedProcessCannotBeVerified' -Values @($processId))
+    }
+
+    $expectedFullPath = [System.IO.Path]::GetFullPath($ExpectedExecutable)
+    if (-not [string]::Equals($actualExecutable, $expectedFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw (Get-Message -Key 'ManagedProcessMismatch' -Values @($processId, $actualExecutable, $expectedFullPath))
+    }
+
+    return $process
+}
+
+function Write-ProcessLogs {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$StandardOutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StandardErrorPath
+    )
+
+    foreach ($logPath in @($StandardOutputPath, $StandardErrorPath)) {
+        if (Test-Path -LiteralPath $logPath) {
+            Get-Content -Encoding UTF8 -Tail 100 -LiteralPath $logPath | ForEach-Object { Write-Host $_ }
+        }
+    }
+}
+
+function Test-PortBindingAvailable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$Port
+    )
+
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+    try {
+        $listener.Start()
+        return $true
+    }
+    catch {
+        return $false
     }
     finally {
-        $ErrorActionPreference = $previousErrorActionPreference
+        $listener.Stop()
+    }
+}
+
+function Get-DirectHttpStatusCode {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+
+        [Parameter()]
+        [int]$TimeoutSeconds = 5
+    )
+
+    $request = [System.Net.HttpWebRequest]::Create($Uri)
+    $request.Method = 'GET'
+    $request.Proxy = $null
+    $request.Timeout = $TimeoutSeconds * 1000
+    $request.ReadWriteTimeout = $TimeoutSeconds * 1000
+    $response = $null
+    try {
+        $response = [System.Net.HttpWebResponse]$request.GetResponse()
+        return [int]$response.StatusCode
+    }
+    finally {
+        if ($null -ne $response) {
+            $response.Dispose()
+        }
     }
 }
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $envPath = Join-Path $repositoryRoot '.env'
-$dockerIgnorePath = Join-Path $repositoryRoot '.dockerignore'
-$builderName = 'new-api-publisher'
-$platform = 'linux/amd64'
-$image = 'new-api-local-dev:personal'
+$webRoot = Join-Path $repositoryRoot 'web'
+$defaultWebRoot = Join-Path $webRoot 'default'
+$classicWebRoot = Join-Path $webRoot 'classic'
+$defaultIndexPath = Join-Path $defaultWebRoot 'dist\index.html'
+$classicIndexPath = Join-Path $classicWebRoot 'dist\index.html'
+$runtimeRoot = Join-Path $repositoryRoot '.local-tests\start-local'
+$executablePath = Join-Path $runtimeRoot 'new-api-local.exe'
+$nextExecutablePath = Join-Path $runtimeRoot 'new-api-local.next.exe'
+$pidPath = Join-Path $runtimeRoot 'new-api-local.pid'
+$standardOutputPath = Join-Path $runtimeRoot 'stdout.log'
+$standardErrorPath = Join-Path $runtimeRoot 'stderr.log'
 $statusUri = "http://127.0.0.1:$Port/api/status"
+$startedProcess = $null
+$startupSucceeded = $false
 
 Push-Location $repositoryRoot
 try {
-    foreach ($command in @('git', 'docker')) {
+    if ($env:OS -ne 'Windows_NT') {
+        throw (Get-Message -Key 'WindowsRequired')
+    }
+
+    foreach ($command in @('git', 'go', 'bun')) {
         if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
             throw (Get-Message -Key 'RequiredCommandMissing' -Values @($command))
         }
@@ -161,13 +213,6 @@ try {
 
     if (-not (Test-Path -LiteralPath $envPath)) {
         throw (Get-Message -Key 'EnvFileMissing' -Values @($envPath))
-    }
-
-    $envContent = @(Get-Content -Encoding UTF8 -LiteralPath $envPath)
-    foreach ($setting in @('SQL_DSN', 'REDIS_CONN_STRING')) {
-        if (-not (Test-EnvSetting -Content $envContent -Name $setting)) {
-            throw (Get-Message -Key 'EnvSettingMissing' -Values @($setting))
-        }
     }
 
     $previousErrorActionPreference = $ErrorActionPreference
@@ -183,145 +228,183 @@ try {
         throw (Get-Message -Key 'EnvNotIgnoredByGit')
     }
 
-    $dockerIgnoreEntries = @(
-        Get-Content -Encoding UTF8 -LiteralPath $dockerIgnorePath |
-            ForEach-Object { $_.Trim() } |
-            Where-Object { $_ -and -not $_.StartsWith('#') }
-    )
-    if ($dockerIgnoreEntries -notcontains '.env' -and $dockerIgnoreEntries -notcontains '/.env') {
-        throw (Get-Message -Key 'EnvNotIgnoredByDocker')
+    $envContent = @(Get-Content -Encoding UTF8 -LiteralPath $envPath)
+    Write-Host (Get-Message -Key 'DevelopmentDatabaseWarning')
+    if (-not (Test-EnvSetting -Content $envContent -Name 'SQL_DSN')) {
+        Write-Host (Get-Message -Key 'UsingSQLite')
+    }
+    if (-not (Test-EnvSetting -Content $envContent -Name 'REDIS_CONN_STRING')) {
+        Write-Host (Get-Message -Key 'RedisDisabled')
+    }
+    if (-not (Test-EnvSetting -Content $envContent -Name 'SESSION_SECRET')) {
+        Write-Host (Get-Message -Key 'SessionSecretWarning')
     }
 
-    Invoke-NativeCommand -Command 'docker' -Arguments @('version')
-    Invoke-NativeCommand -Command 'docker' -Arguments @('buildx', 'version')
-
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        & docker buildx inspect $builderName *> $null
-        $builderExists = $LASTEXITCODE -eq 0
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-
-    if (-not $builderExists) {
-        Write-Host (Get-Message -Key 'CreatingBuilder' -Values @($builderName))
-        Invoke-NativeCommand -Command 'docker' -Arguments @(
-            'buildx', 'create',
-            '--name', $builderName,
-            '--driver', 'docker-container',
-            '--bootstrap'
-        )
-    }
-
-    Write-Host (Get-Message -Key 'PreparingBuilder' -Values @($builderName))
-    $builderDetails = Get-NativeOutput -Command 'docker' -Arguments @('buildx', 'inspect', $builderName, '--bootstrap')
-    if ($builderDetails -notmatch '(?m)^Driver:\s+docker-container\s*$') {
-        throw (Get-Message -Key 'InvalidBuilderDriver' -Values @($builderName))
-    }
+    New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
 
     $commitSha = Get-NativeOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')
-    Write-Host (Get-Message -Key 'DevelopmentDatabaseWarning')
     Write-Host (Get-Message -Key 'SourceCommit' -Values @($commitSha))
-    Write-Host (Get-Message -Key 'TargetImage' -Values @($image))
-    Write-Host (Get-Message -Key 'TargetContainer' -Values @($ContainerName))
+    Write-Host (Get-Message -Key 'RuntimeDirectory' -Values @($runtimeRoot))
+
+    $managedProcess = Get-ManagedProcess -PidFile $pidPath -ExpectedExecutable $executablePath
+    if ($null -ne $managedProcess) {
+        Write-Host (Get-Message -Key 'StoppingProcess' -Values @($managedProcess.Id))
+        Stop-Process -Id $managedProcess.Id -Force
+        Wait-Process -Id $managedProcess.Id -Timeout 30 -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+    }
 
     if ($SkipBuild) {
-        $previousErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try {
-            & docker image inspect $image *> $null
-            $imageExists = $LASTEXITCODE -eq 0
-        }
-        finally {
-            $ErrorActionPreference = $previousErrorActionPreference
-        }
-        if (-not $imageExists) {
-            throw (Get-Message -Key 'SkippedBuildImageMissing' -Values @($image))
+        foreach ($artifact in @($defaultIndexPath, $classicIndexPath, $executablePath)) {
+            if (-not (Test-Path -LiteralPath $artifact)) {
+                throw (Get-Message -Key 'SkippedBuildArtifactMissing' -Values @($artifact))
+            }
         }
         Write-Host (Get-Message -Key 'SkippedBuild')
     }
     else {
-        Write-Host (Get-Message -Key 'BuildingImage')
-        $buildArguments = @(
-            'buildx', 'build',
-            '--builder', $builderName,
-            '--platform', $platform,
-            '--label', "org.opencontainers.image.revision=$commitSha",
-            '--label', 'com.ahyi.new-api.local=true',
-            '--tag', $image,
-            '--load',
-            $repositoryRoot
-        )
-        Invoke-NativeCommandWithRetry -Command 'docker' -Arguments $buildArguments
+        Write-Host (Get-Message -Key 'InstallingWebDependencies')
+        Push-Location $webRoot
+        try {
+            Invoke-NativeCommand -Command 'bun' -Arguments @('install', '--frozen-lockfile')
+        }
+        finally {
+            Pop-Location
+        }
+
+        $originalFrontendVersion = [Environment]::GetEnvironmentVariable('VITE_REACT_APP_VERSION', 'Process')
+        $env:VITE_REACT_APP_VERSION = $commitSha.Substring(0, 8)
+        try {
+            Write-Host (Get-Message -Key 'BuildingDefaultWeb')
+            Push-Location $defaultWebRoot
+            try {
+                Invoke-NativeCommand -Command 'bun' -Arguments @('run', 'build')
+            }
+            finally {
+                Pop-Location
+            }
+
+            Write-Host (Get-Message -Key 'BuildingClassicWeb')
+            Push-Location $classicWebRoot
+            try {
+                Invoke-NativeCommand -Command 'bun' -Arguments @('run', 'build')
+            }
+            finally {
+                Pop-Location
+            }
+        }
+        finally {
+            if ($null -eq $originalFrontendVersion) {
+                Remove-Item -LiteralPath 'Env:VITE_REACT_APP_VERSION' -ErrorAction SilentlyContinue
+            }
+            else {
+                [Environment]::SetEnvironmentVariable('VITE_REACT_APP_VERSION', $originalFrontendVersion, 'Process')
+            }
+        }
+
+        Write-Host (Get-Message -Key 'BuildingExecutable')
+        Invoke-NativeCommand -Command 'go' -Arguments @('build', '-o', $nextExecutablePath, '.')
     }
 
-    $existingContainer = Get-NativeOutput -Command 'docker' -Arguments @(
-        'ps', '--all', '--quiet',
-        '--filter', "name=^/$ContainerName$"
-    )
-    if ($existingContainer) {
-        Write-Host (Get-Message -Key 'RemovingContainer' -Values @($ContainerName))
-        Invoke-NativeCommand -Command 'docker' -Arguments @('rm', '--force', $ContainerName)
+    if (-not $SkipBuild) {
+        Move-Item -LiteralPath $nextExecutablePath -Destination $executablePath -Force
     }
 
-    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
-    try {
-        $listener.Start()
+    $portReleaseDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    $waitingForPort = $false
+    while (-not (Test-PortBindingAvailable -Port $Port)) {
+        if (-not $waitingForPort) {
+            Write-Host (Get-Message -Key 'WaitingForPortRelease' -Values @($Port))
+            $waitingForPort = $true
+        }
+        if ([DateTime]::UtcNow -ge $portReleaseDeadline) {
+            break
+        }
+        Start-Sleep -Seconds 1
     }
-    catch {
+    if (-not (Test-PortBindingAvailable -Port $Port)) {
         throw (Get-Message -Key 'PortBusy' -Values @($Port))
     }
+
+    Remove-Item -LiteralPath $standardOutputPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $standardErrorPath -Force -ErrorAction SilentlyContinue
+
+    Write-Host (Get-Message -Key 'StartingProcess')
+    $originalPort = [Environment]::GetEnvironmentVariable('PORT', 'Process')
+    $env:PORT = [string]$Port
+    try {
+        $startedProcess = Start-Process `
+            -FilePath $executablePath `
+            -WorkingDirectory $repositoryRoot `
+            -RedirectStandardOutput $standardOutputPath `
+            -RedirectStandardError $standardErrorPath `
+            -WindowStyle Hidden `
+            -PassThru
+    }
     finally {
-        $listener.Stop()
+        if ($null -eq $originalPort) {
+            Remove-Item -LiteralPath 'Env:PORT' -ErrorAction SilentlyContinue
+        }
+        else {
+            [Environment]::SetEnvironmentVariable('PORT', $originalPort, 'Process')
+        }
+    }
+    if ($null -eq $startedProcess) {
+        throw (Get-Message -Key 'ProcessStartFailed')
     }
 
-    Write-Host (Get-Message -Key 'StartingContainer')
-    $containerId = Get-NativeOutput -Command 'docker' -Arguments @(
-        'run', '--detach',
-        '--name', $ContainerName,
-        '--label', 'com.ahyi.new-api.local=true',
-        '--env-file', $envPath,
-        '--publish', "127.0.0.1:${Port}:3000",
-        '--volume', "${VolumeName}:/data",
-        $image
-    )
-    if (-not $containerId) {
-        throw (Get-Message -Key 'ContainerStartFailed')
-    }
+    Set-Content -NoNewline -Encoding ASCII -LiteralPath $pidPath -Value ([string]$startedProcess.Id)
 
     $deadline = [DateTime]::UtcNow.AddSeconds($StartupTimeoutSeconds)
     $lastHealthError = $null
+    $consecutiveHealthyResponses = 0
     while ([DateTime]::UtcNow -lt $deadline) {
-        $running = Get-NativeOutput -Command 'docker' -Arguments @('inspect', '--format', '{{.State.Running}}', $ContainerName)
-        if ($running -ne 'true') {
-            $status = Get-NativeOutput -Command 'docker' -Arguments @('inspect', '--format', '{{.State.Status}} (exit={{.State.ExitCode}})', $ContainerName)
-            Write-Host (Get-Message -Key 'ContainerLogs')
-            Write-ContainerLogs -Name $ContainerName
-            throw (Get-Message -Key 'ContainerExited' -Values @($status))
+        $startedProcess.Refresh()
+        if ($startedProcess.HasExited) {
+            Write-Host (Get-Message -Key 'ProcessLogs')
+            Write-ProcessLogs -StandardOutputPath $standardOutputPath -StandardErrorPath $standardErrorPath
+            throw (Get-Message -Key 'ProcessExited' -Values @($startedProcess.ExitCode))
         }
 
         try {
-            $response = Invoke-WebRequest -UseBasicParsing -Uri $statusUri -TimeoutSec 5
-            if ($response.StatusCode -eq 200) {
+            $statusCode = Get-DirectHttpStatusCode -Uri $statusUri
+            if ($statusCode -eq 200) {
+                $consecutiveHealthyResponses++
+            }
+            else {
+                $consecutiveHealthyResponses = 0
+            }
+            if ($consecutiveHealthyResponses -ge 2) {
+                $startedProcess.Refresh()
+                if ($startedProcess.HasExited) {
+                    continue
+                }
+                $startupSucceeded = $true
                 Write-Host ''
                 Write-Host (Get-Message -Key 'StartupPassed' -Values @($statusUri))
-                Write-Host (Get-Message -Key 'ContainerRunning' -Values @($ContainerName, $response.StatusCode))
+                Write-Host (Get-Message -Key 'ProcessRunning' -Values @($startedProcess.Id, $statusCode))
                 return
             }
         }
         catch {
+            $consecutiveHealthyResponses = 0
             $lastHealthError = $_.Exception.Message
         }
 
         Start-Sleep -Seconds 2
     }
 
-    Write-Host (Get-Message -Key 'ContainerLogs')
-    Write-ContainerLogs -Name $ContainerName
+    Write-Host (Get-Message -Key 'ProcessLogs')
+    Write-ProcessLogs -StandardOutputPath $standardOutputPath -StandardErrorPath $standardErrorPath
     throw (Get-Message -Key 'StartupTimeout' -Values @($StartupTimeoutSeconds, $statusUri, $lastHealthError))
 }
 finally {
+    if (-not $startupSucceeded -and $null -ne $startedProcess) {
+        $startedProcess.Refresh()
+        if (-not $startedProcess.HasExited) {
+            Stop-Process -Id $startedProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+    }
     Pop-Location
 }

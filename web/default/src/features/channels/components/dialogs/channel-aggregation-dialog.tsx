@@ -65,7 +65,7 @@ function getGroupKey(group: ChannelAggregationGroup) {
 
 export function ChannelAggregationDialog(props: ChannelAggregationDialogProps) {
   const { t } = useTranslation()
-  const { setOpen, setAggregationDraft } = useChannels()
+  const { setOpen, setAggregationPreparation } = useChannels()
   const [selectionByGroup, setSelectionByGroup] = useState<
     Record<string, number[]>
   >({})
@@ -145,9 +145,9 @@ export function ChannelAggregationDialog(props: ChannelAggregationDialogProps) {
               response.message || t('Failed to prepare channel aggregation')
             )
           }
-          setAggregationDraft(response.data)
+          setAggregationPreparation(response.data)
           handleOpenChange(false)
-          setOpen('aggregate-channel')
+          setOpen('aggregate-channel-config')
         },
         {
           preferredMethod: 'passkey',
@@ -212,9 +212,7 @@ export function ChannelAggregationDialog(props: ChannelAggregationDialogProps) {
           )
           const allSelected =
             selectableChannels.length > 0 &&
-            selectableChannels.every((channel) =>
-              selectedIdSet.has(channel.id)
-            )
+            selectableChannels.every((channel) => selectedIdSet.has(channel.id))
           const isPreparing = preparingGroupKey === groupKey
 
           return (

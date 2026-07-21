@@ -191,6 +191,106 @@ func TestAggregateChannelsCreatesDestinationAndDeletesSources(t *testing.T) {
 	assert.Equal(t, int64(1), targetAbilityCount)
 }
 
+func TestAggregateChannelsPreservesVertexMultiKeySerialization(t *testing.T) {
+	setupChannelAggregationTestDB(t)
+	first := &Channel{
+		Type:   constant.ChannelTypeVertexAi,
+		Name:   "vertex-first",
+		Key:    `{"client_email":"one@example.com"}`,
+		Models: "gemini-2.5-pro",
+		Group:  "default",
+		Status: common.ChannelStatusEnabled,
+	}
+	second := &Channel{
+		Type:   constant.ChannelTypeVertexAi,
+		Name:   "vertex-second",
+		Key:    `{"client_email":"two@example.com"}`,
+		Models: "gemini-2.5-pro",
+		Group:  "default",
+		Status: common.ChannelStatusEnabled,
+	}
+	insertAggregationSource(t, first)
+	insertAggregationSource(t, second)
+
+	prepared, err := PrepareChannelAggregationByIDs([]int{first.Id, second.Id})
+	require.NoError(t, err)
+	snapshotToken, err := prepared.SnapshotToken()
+	require.NoError(t, err)
+	result, err := AggregateChannels([]int{first.Id, second.Id}, snapshotToken, &Channel{
+		Name:   "vertex-aggregated",
+		Models: "gemini-2.5-pro",
+		Group:  "default",
+		Status: common.ChannelStatusEnabled,
+	})
+	require.NoError(t, err)
+
+	var stored Channel
+	require.NoError(t, DB.First(&stored, result.ChannelID).Error)
+	assert.JSONEq(t,
+		`[{"client_email":"one@example.com"},{"client_email":"two@example.com"}]`,
+		stored.Key,
+	)
+	assert.Equal(t, prepared.Keys, stored.GetKeys())
+}
+
+func TestAggregateChannelsRejectsInvalidDestinationWithoutDeletingSources(t *testing.T) {
+	setupChannelAggregationTestDB(t)
+	first := &Channel{Type: 1, Name: "first", Key: "key-a", Models: "gpt-4o", Group: "default", Status: 1}
+	second := &Channel{Type: 1, Name: "second", Key: "key-b", Models: "gpt-4o", Group: "default", Status: 1}
+	insertAggregationSource(t, first)
+	insertAggregationSource(t, second)
+	prepared, err := PrepareChannelAggregationByIDs([]int{first.Id, second.Id})
+	require.NoError(t, err)
+	snapshotToken, err := prepared.SnapshotToken()
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		destination *Channel
+		errorText   string
+	}{
+		{
+			name:        "空名称",
+			destination: &Channel{Models: "gpt-4o", Group: "default"},
+			errorText:   "聚合渠道名称不能为空",
+		},
+		{
+			name:        "空模型",
+			destination: &Channel{Name: "aggregated", Group: "default"},
+			errorText:   "聚合渠道模型不能为空",
+		},
+		{
+			name:        "模型包含空值",
+			destination: &Channel{Name: "aggregated", Models: "gpt-4o,", Group: "default"},
+			errorText:   "聚合渠道模型不能包含空值",
+		},
+		{
+			name:        "空分组",
+			destination: &Channel{Name: "aggregated", Models: "gpt-4o"},
+			errorText:   "聚合渠道分组不能为空",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := AggregateChannels(
+				[]int{first.Id, second.Id},
+				snapshotToken,
+				test.destination,
+			)
+			require.EqualError(t, err, test.errorText)
+
+			var sourceCount int64
+			require.NoError(t, DB.Model(&Channel{}).Where("id IN ?", []int{first.Id, second.Id}).Count(&sourceCount).Error)
+			assert.Equal(t, int64(2), sourceCount)
+
+			var channelCount int64
+			require.NoError(t, DB.Model(&Channel{}).Count(&channelCount).Error)
+			assert.Equal(t, int64(2), channelCount)
+		})
+	}
+}
+
 func TestAggregateChannelsRejectsRemovedDuplicateSourceKey(t *testing.T) {
 	setupChannelAggregationTestDB(t)
 	first := &Channel{Type: 1, Name: "first", Key: "key-a", Models: "gpt-4o", Group: "default", Status: 1}

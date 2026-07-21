@@ -65,7 +65,6 @@ import {
   sideDrawerSwitchItemClassName,
 } from '@/components/drawer-layout'
 import { JsonEditor } from '@/components/json-editor'
-import { MultiSelect } from '@/components/multi-select'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -173,6 +172,10 @@ import {
   collectNewDisallowedStatusCodeRedirects,
 } from '../../lib/status-code-risk-guard'
 import type { Channel, ChannelAggregationDraft } from '../../types'
+import {
+  ChannelGroupsControl,
+  ChannelModelsControl,
+} from '../channel-form-controls'
 import { useChannels } from '../channels-provider'
 import { AdvancedCustomEditorDialog } from '../dialogs/advanced-custom-editor-dialog'
 import { FetchModelsDialog } from '../dialogs/fetch-models-dialog'
@@ -1249,6 +1252,7 @@ export function ChannelMutateDrawer({
     if (isAggregation && aggregationDraft) {
       form.reset({
         ...CHANNEL_FORM_DEFAULT_VALUES,
+        ...aggregationDraft.prefill,
         type: aggregationDraft.type,
         base_url: aggregationDraft.base_url,
         key: aggregationDraft.key,
@@ -3371,17 +3375,10 @@ export function ChannelMutateDrawer({
                                     </Badge>
                                   </div>
                                   <FormControl>
-                                    <MultiSelect
+                                    <ChannelModelsControl
                                       options={modelOptions}
                                       selected={currentModelsArray}
                                       onChange={handleModelsChange}
-                                      placeholder={t(
-                                        'Select models or add custom ones'
-                                      )}
-                                      allowCreate
-                                      createLabel='Add custom model "{{value}}"'
-                                      maxVisibleChips={8}
-                                      copyChipOnClick
                                     />
                                   </FormControl>
                                   {modelMappingGuardrail.exposedTargetModels
@@ -3692,13 +3689,10 @@ export function ChannelMutateDrawer({
                                     {isLoadingGroups ? (
                                       <Skeleton className='h-10 w-full' />
                                     ) : (
-                                      <MultiSelect
+                                      <ChannelGroupsControl
                                         options={groupOptions}
                                         selected={field.value}
                                         onChange={field.onChange}
-                                        placeholder={t(
-                                          FIELD_PLACEHOLDERS.GROUP
-                                        )}
                                       />
                                     )}
                                   </FormControl>

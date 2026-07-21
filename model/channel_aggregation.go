@@ -266,6 +266,29 @@ func AggregateChannels(sourceIDs []int, snapshotToken string, destination *Chann
 	if snapshotToken == "" || destination == nil {
 		return nil, errors.New("聚合参数不能为空")
 	}
+	destination.Name = strings.TrimSpace(destination.Name)
+	if destination.Name == "" {
+		return nil, errors.New("聚合渠道名称不能为空")
+	}
+	for _, requiredList := range []struct {
+		name  string
+		value *string
+	}{
+		{name: "模型", value: &destination.Models},
+		{name: "分组", value: &destination.Group},
+	} {
+		if strings.TrimSpace(*requiredList.value) == "" {
+			return nil, fmt.Errorf("聚合渠道%s不能为空", requiredList.name)
+		}
+		items := strings.Split(*requiredList.value, ",")
+		for index, item := range items {
+			items[index] = strings.TrimSpace(item)
+			if items[index] == "" {
+				return nil, fmt.Errorf("聚合渠道%s不能包含空值", requiredList.name)
+			}
+		}
+		*requiredList.value = strings.Join(items, ",")
+	}
 
 	result := &ChannelAggregationResult{}
 	err := DB.Transaction(func(tx *gorm.DB) error {
@@ -296,7 +319,7 @@ func AggregateChannels(sourceIDs []int, snapshotToken string, destination *Chann
 			baseURL := prepared.BaseURL
 			destination.BaseURL = &baseURL
 		}
-		destination.Key = strings.Join(prepared.Keys, "\n")
+		destination.Key = prepared.KeyText
 		destination.ChannelInfo.IsMultiKey = true
 		destination.ChannelInfo.MultiKeySize = len(prepared.Keys)
 		destination.ChannelInfo.MultiKeyStatusList = nil

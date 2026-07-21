@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 
@@ -32,6 +33,24 @@ type channelAggregationCandidate struct {
 	KeyCount       int    `json:"key_count"`
 	Eligible       bool   `json:"eligible"`
 	DisabledReason string `json:"disabled_reason,omitempty"`
+}
+
+// channelAggregationSourceConfig 只暴露聚合配置选择阶段需要的基础字段。
+// 密钥、运行状态、余额和复杂 JSON 配置继续由聚合流程单独处理，避免把无关运行态带入新渠道。
+type channelAggregationSourceConfig struct {
+	ID                 int     `json:"id"`
+	Name               string  `json:"name"`
+	OpenAIOrganization *string `json:"openai_organization"`
+	TestModel          *string `json:"test_model"`
+	Weight             *uint   `json:"weight"`
+	Group              string  `json:"group"`
+	Priority           *int64  `json:"priority"`
+	AutoBan            *int    `json:"auto_ban"`
+	Tag                *string `json:"tag"`
+	Remark             *string `json:"remark"`
+	Other              string  `json:"other"`
+	Proxy              string  `json:"proxy"`
+	Models             string  `json:"models"`
 }
 
 type channelAggregationSourceRequest struct {
@@ -138,9 +157,31 @@ func PrepareChannelAggregation(c *gin.Context) {
 
 	sourceIDs := make([]int, 0, len(prepared.Channels))
 	sources := make([]gin.H, 0, len(prepared.Channels))
+	sourceConfigs := make([]channelAggregationSourceConfig, 0, len(prepared.Channels))
 	for _, channel := range prepared.Channels {
 		sourceIDs = append(sourceIDs, channel.Id)
 		sources = append(sources, gin.H{"id": channel.Id, "name": channel.Name})
+
+		config := dto.ChannelSettings{}
+		if channel.Setting != nil && strings.TrimSpace(*channel.Setting) != "" {
+			// 配置选择只读取代理字段，解析失败时按空代理处理，不能因为历史脏 JSON 阻断密钥聚合。
+			_ = common.Unmarshal([]byte(*channel.Setting), &config)
+		}
+		sourceConfigs = append(sourceConfigs, channelAggregationSourceConfig{
+			ID:                 channel.Id,
+			Name:               channel.Name,
+			OpenAIOrganization: channel.OpenAIOrganization,
+			TestModel:          channel.TestModel,
+			Weight:             channel.Weight,
+			Group:              channel.Group,
+			Priority:           channel.Priority,
+			AutoBan:            channel.AutoBan,
+			Tag:                channel.Tag,
+			Remark:             channel.Remark,
+			Other:              channel.Other,
+			Proxy:              config.Proxy,
+			Models:             channel.Models,
+		})
 	}
 	recordManageAudit(c, "channel.aggregate_prepare", map[string]interface{}{
 		"source_ids": sourceIDs,
@@ -150,6 +191,7 @@ func PrepareChannelAggregation(c *gin.Context) {
 	common.ApiSuccess(c, gin.H{
 		"source_ids":     sourceIDs,
 		"sources":        sources,
+		"source_configs": sourceConfigs,
 		"type":           prepared.Type,
 		"base_url":       prepared.BaseURL,
 		"key":            prepared.KeyText,
@@ -186,7 +228,7 @@ func AggregateChannels(c *gin.Context) {
 
 	destination := *request.Channel
 	destination.Type = prepared.Type
-	destination.Key = strings.Join(prepared.Keys, "\n")
+	destination.Key = prepared.KeyText
 	destination.ChannelInfo = model.ChannelInfo{
 		IsMultiKey:   true,
 		MultiKeySize: len(prepared.Keys),
@@ -199,6 +241,7 @@ func AggregateChannels(c *gin.Context) {
 		destination.BaseURL = &baseURL
 	}
 	destination.CreatedTime = common.GetTimestamp()
+	destination.Status = common.ChannelStatusEnabled
 	destination.TestTime = 0
 	destination.ResponseTime = 0
 	destination.Balance = 0

@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useChannels } from './channels-provider'
 import { BalanceQueryDialog } from './dialogs/balance-query-dialog'
+import { ChannelAggregationConfigDialog } from './dialogs/channel-aggregation-config-dialog'
 import { ChannelAggregationDialog } from './dialogs/channel-aggregation-dialog'
 import { ChannelTestDialog } from './dialogs/channel-test-dialog'
 import { CopyChannelDialog } from './dialogs/copy-channel-dialog'
@@ -37,6 +38,8 @@ export function ChannelsDialogs() {
     currentRow,
     aggregationDraft,
     setAggregationDraft,
+    aggregationPreparation,
+    setAggregationPreparation,
     upstream,
   } = useChannels()
 
@@ -52,6 +55,22 @@ export function ChannelsDialogs() {
       <ChannelAggregationDialog
         open={open === 'aggregate-channels'}
         onOpenChange={(v) => !v && setOpen(null)}
+      />
+
+      <ChannelAggregationConfigDialog
+        open={open === 'aggregate-channel-config'}
+        prepared={aggregationPreparation}
+        onCancel={() => {
+          setAggregationPreparation(null)
+          setAggregationDraft(null)
+          setOpen(null)
+        }}
+        onContinue={(prefill) => {
+          if (!aggregationPreparation) return
+          setAggregationDraft({ ...aggregationPreparation, prefill })
+          setAggregationPreparation(null)
+          setOpen('aggregate-channel')
+        }}
       />
 
       <ChannelAggregateDrawer
