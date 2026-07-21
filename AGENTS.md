@@ -22,13 +22,13 @@ This is an AI API gateway/proxy built with Go. It aggregates 40+ upstream AI pro
 1. 执行 `git status --short --branch`，确认当前分支和工作区状态。
 2. 若存在未暂存改动，先确认改动范围及是否包含密钥、数据库、构建产物或本地工具文件，再按会话规则执行 `git add .`；只暂存，不得未经授权提交。
 3. 若工作区和暂存区均为空，在开始修改前拉取当前远程分支的最新提交。
-4. 每次准备修改代码前，必须执行 `git fetch upstream --prune --tags` 并检查 `upstream/main` 是否有新提交；若有更新，必须先按下方官方代码同步流程拉取并合并，确认当前开发分支已包含最新 `upstream/main` 后才能开始修改代码。
+4. 每次准备修改代码前，必须执行 `git fetch upstream --prune --tags` 并检查 `upstream/main` 是否有新提交；若有更新，只报告提交范围、风险和建议验证项，未经用户针对本次同步的明确授权，禁止合并、变基或推动任何长期分支。
 5. 同步官方代码、切换长期分支或执行变基前，工作区和暂存区必须为空；存在改动时应先完成当前工作或请求用户决定，禁止自动丢弃、覆盖或暂存到未知位置。
 6. 禁止未经授权执行 `git push`、`git rebase`、`git reset --hard`、`git checkout --`、强制更新分支或改写历史。
 
 ### 官方代码同步流程
 
-在工作区和暂存区为空时执行：
+仅在用户明确授权本次官方同步，且工作区和暂存区为空时执行：
 
 ```bash
 git switch main
@@ -55,7 +55,7 @@ git push --force-with-lease origin personal
 2. 每个提交只表达一个可独立理解和验证的改动，禁止把官方同步、个人功能和无关格式调整混入同一提交。
 3. 配置优先使用环境变量或部署覆盖文件；禁止提交 `.env`、令牌、密码、数据库文件及真实连接信息。
 4. 数据库变更必须使用可向前升级、可审计的迁移，并同时兼容 SQLite、MySQL 和 PostgreSQL；发布前评估旧镜像能否读取迁移后的数据库。
-5. 完成功能后先同步并整合最新 `main`，再执行测试、构建镜像和部署验证。
+5. 完成功能后记录当前实际包含的官方基线，并报告与最新 `upstream/main` 的差异；是否同步由用户单独决定，不得把同步上游作为测试、构建或发布的隐式前置条件。
 6. Git Commit 必须遵循会话级中文提交格式；未经用户明确授权不得提交或推送。
 
 ### 最小验证要求
@@ -84,6 +84,7 @@ git push --force-with-lease origin personal
 - 本地发布个人 Docker Hub 镜像必须统一执行 `.\scripts\publish-dockerhub.ps1`，默认不传参数，由脚本自动选择下一个不可变版本并同步更新 `personal-latest`；禁止再手工拼装 `docker buildx build`、逐架构推送或清单合并命令替代该脚本。
 - 正式发布前可执行 `.\scripts\publish-dockerhub.ps1 -PreflightOnly` 仅做前置检查；确需指定版本时使用 `-Version <标签>`。脚本或发布环境失败时应修复根因后重新运行脚本，不得绕过其分支、工作区、上游基线、测试、双架构、远程清单或冒烟验证。
 - 发布脚本及其相关改动必须先提交并推送到 `origin/personal`，再执行正式发布。用户后续要求“发布镜像”时，默认含义即为按本节调用该脚本完成发布和验证。
+- 发布脚本使用 `personal` 当前实际包含的官方提交作为版本与镜像元数据基线；发现更新的 `upstream/main` 时只告警，禁止为了满足发布检查而自动同步上游。
 - 镜像只能从已验证且工作区干净的 `personal` 提交或其发布标签构建，禁止从 `main` 或带未提交改动的工作区发布。
 - 镜像发布到个人命名空间，例如 `ghcr.io/AhYi8/new-api`；禁止覆盖或冒充官方 `calciumion/new-api` 镜像。
 - 生产环境必须使用不可变版本标签或镜像摘要，例如 `personal-v1.0.0-rc.21-r1`；可额外维护 `personal-latest` 供人工测试，但不得将其作为唯一生产回滚依据。

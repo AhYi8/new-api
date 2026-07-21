@@ -3,9 +3,9 @@
 从 personal 分支一键构建、验证并发布个人 Docker Hub 多架构镜像。
 
 .DESCRIPTION
-默认根据 upstream/main 最近的官方版本标签和 Docker Hub 现有个人版本，自动选择下一个
-personal-<官方版本>-rN 标签，同时更新 personal-latest。发布前要求工作区干净、当前提交
-已推送到 origin/personal，并且已经包含最新 upstream/main。
+默认根据当前代码实际包含的官方基线版本标签和 Docker Hub 现有个人版本，自动选择下一个
+personal-<官方版本>-rN 标签，同时更新 personal-latest。发布前要求工作区干净且当前提交
+已推送到 origin/personal；发现更新的 upstream/main 时只告警，不会自动同步。
 
 .EXAMPLE
 .\scripts\publish-dockerhub.ps1
@@ -344,7 +344,12 @@ function Get-PublicIPv4Address {
 }
 
 function Get-OfficialVersion {
-    $officialVersion = Get-NativeOutput -Command 'git' -Arguments @('describe', '--tags', '--abbrev=0', '--match', 'v*', 'upstream/main')
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Revision
+    )
+
+    $officialVersion = Get-NativeOutput -Command 'git' -Arguments @('describe', '--tags', '--abbrev=0', '--match', 'v*', $Revision)
     if ($officialVersion -notmatch '^v[0-9A-Za-z][0-9A-Za-z._-]*$') {
         throw (Get-Message -Key 'OfficialVersionInvalid' -Values @($officialVersion))
     }
@@ -535,9 +540,11 @@ try {
         throw (Get-Message -Key 'TrackingMismatch' -Values @('origin/personal', $countParts[0], $countParts[1]))
     }
 
-    $upstreamBehindCount = Get-NativeOutput -Command 'git' -Arguments @('rev-list', '--count', 'HEAD..upstream/main')
+    # 发布必须记录当前代码实际包含的官方基线，不能为了发布而隐式要求合并最新上游。
+    $upstreamRevision = Get-NativeOutput -Command 'git' -Arguments @('merge-base', 'HEAD', 'upstream/main')
+    $upstreamBehindCount = Get-NativeOutput -Command 'git' -Arguments @('rev-list', '--count', "$upstreamRevision..upstream/main")
     if ($upstreamBehindCount -ne '0') {
-        throw (Get-Message -Key 'UpstreamNotMerged' -Values @($upstreamBehindCount))
+        Write-Warning (Get-Message -Key 'UpstreamUpdatesSkipped' -Values @($upstreamBehindCount, $upstreamRevision))
     }
 
     Invoke-NativeCommand -Command 'docker' -Arguments @('version')
@@ -714,7 +721,7 @@ try {
         throw (Get-Message -Key 'InvalidBuilderDriver' -Values @($builderName))
     }
 
-    $officialVersion = Get-OfficialVersion
+    $officialVersion = Get-OfficialVersion -Revision $upstreamRevision
     if (-not $Version) {
         $Version = Get-NextPersonalVersion -ImagePath $imagePath -OfficialVersion $officialVersion
         Write-Host (Get-Message -Key 'AutoVersionSelected' -Values @($Version))
@@ -727,7 +734,6 @@ try {
 
     $commitSha = Get-NativeOutput -Command 'git' -Arguments @('rev-parse', 'HEAD')
     $shortSha = Get-NativeOutput -Command 'git' -Arguments @('rev-parse', '--short=12', 'HEAD')
-    $upstreamRevision = Get-NativeOutput -Command 'git' -Arguments @('rev-parse', 'upstream/main')
     $originUrl = Get-NativeOutput -Command 'git' -Arguments @('config', '--get', 'remote.origin.url')
     if ($originUrl -match '^git@github\.com:(.+)$') {
         $sourceUrl = "https://github.com/$($Matches[1])"
