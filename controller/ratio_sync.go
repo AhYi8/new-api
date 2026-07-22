@@ -29,21 +29,35 @@ import (
 )
 
 const (
-	defaultTimeoutSeconds       = 10
-	defaultEndpoint             = "/api/pricing"
-	maxConcurrentFetches        = 8
-	maxRatioConfigBytes         = 10 << 20 // 10MB
-	floatEpsilon                = 1e-9
-	officialRatioPresetID       = -100
-	officialRatioPresetName     = "官方倍率预设"
-	officialRatioPresetBaseURL  = "https://basellm.github.io"
-	modelsDevPresetID           = -101
-	modelsDevPresetName         = "models.dev 价格预设"
-	modelsDevPresetBaseURL      = "https://models.dev"
-	modelsDevHost               = "models.dev"
-	modelsDevPath               = "/api.json"
-	modelsDevInputCostRatioBase = 1000.0
+	defaultTimeoutSeconds        = 10
+	defaultEndpoint              = "/api/pricing"
+	maxConcurrentFetches         = 8
+	maxRatioConfigBytes          = 10 << 20 // 10MB
+	floatEpsilon                 = 1e-9
+	maxPricingSyncModelNameBytes = 512
+	officialRatioPresetID        = -100
+	officialRatioPresetName      = "官方倍率预设"
+	officialRatioPresetBaseURL   = "https://basellm.github.io"
+	modelsDevPresetID            = -101
+	modelsDevPresetName          = "models.dev 价格预设"
+	modelsDevPresetBaseURL       = "https://models.dev"
+	modelsDevHost                = "models.dev"
+	modelsDevPath                = "/api.json"
+	modelsDevInputCostRatioBase  = 1000.0
 )
+
+var pricingSyncFieldSet = map[string]bool{
+	"model_ratio":                    true,
+	"completion_ratio":               true,
+	"cache_ratio":                    true,
+	"create_cache_ratio":             true,
+	"image_ratio":                    true,
+	"audio_ratio":                    true,
+	"audio_completion_ratio":         true,
+	"model_price":                    true,
+	billing_setting.BillingModeField: true,
+	billing_setting.BillingExprField: true,
+}
 
 func nearlyEqual(a, b float64) bool {
 	if a > b {
@@ -140,6 +154,7 @@ func getLocalPricingSyncData() map[string]any {
 }
 
 func FetchUpstreamRatios(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRatioConfigBytes)
 	var req dto.UpstreamRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		common.SysError("failed to bind upstream request: " + err.Error())
@@ -523,12 +538,187 @@ func FetchUpstreamRatios(c *gin.Context) {
 	}
 
 	differences := buildDifferences(localData, successfulChannels)
+	locks, err := model.GetModelPricingLocks()
+	if err != nil {
+		logger.LogError(c.Request.Context(), "读取模型价格锁失败："+err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "读取模型价格锁失败"})
+		return
+	}
+	ignoredLockedModels := filterLockedPricingDifferences(differences, locks)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
-			"differences":  differences,
-			"test_results": testResults,
+			"differences":           differences,
+			"test_results":          testResults,
+			"ignored_locked_models": ignoredLockedModels,
+		},
+	})
+}
+
+func filterLockedPricingDifferences(
+	differences map[string]map[string]dto.DifferenceItem,
+	locks map[string]bool,
+) []string {
+	ignoredLockedModels := make([]string, 0)
+	for modelName := range differences {
+		if locks[modelName] {
+			delete(differences, modelName)
+			ignoredLockedModels = append(ignoredLockedModels, modelName)
+		}
+	}
+	sort.Strings(ignoredLockedModels)
+	return ignoredLockedModels
+}
+
+type modelPricingLockRequest struct {
+	ModelName string `json:"model_name"`
+	Locked    *bool  `json:"locked"`
+}
+
+type applyModelPricingSyncRequest struct {
+	Resolutions map[string]map[string]any `json:"resolutions"`
+}
+
+func validateModelName(modelName string) (string, error) {
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		return "", fmt.Errorf("模型名称不能为空")
+	}
+	if len([]byte(modelName)) > maxPricingSyncModelNameBytes {
+		return "", fmt.Errorf("模型名称过长")
+	}
+	return modelName, nil
+}
+
+func normalizePricingSyncResolutions(resolutions map[string]map[string]any) (map[string]map[string]any, error) {
+	if len(resolutions) == 0 {
+		return nil, fmt.Errorf("没有可应用的价格同步项")
+	}
+	normalized := make(map[string]map[string]any, len(resolutions))
+	for rawModelName, fields := range resolutions {
+		modelName, err := validateModelName(rawModelName)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := normalized[modelName]; exists {
+			return nil, fmt.Errorf("模型名称重复：%s", modelName)
+		}
+		if len(fields) == 0 {
+			return nil, fmt.Errorf("模型 %s 没有可应用的同步字段", modelName)
+		}
+		normalizedFields := make(map[string]any, len(fields))
+		for field, value := range fields {
+			if !pricingSyncFieldSet[field] {
+				return nil, fmt.Errorf("不支持的价格同步字段：%s", field)
+			}
+			if numericPricingSyncFields[field] {
+				number, ok := asFloat64(value)
+				if !ok || math.IsNaN(number) || math.IsInf(number, 0) || number < 0 {
+					return nil, fmt.Errorf("模型 %s 的 %s 必须是非负有限数字", modelName, field)
+				}
+				normalizedFields[field] = number
+				continue
+			}
+			text, ok := value.(string)
+			if !ok {
+				return nil, fmt.Errorf("模型 %s 的 %s 必须是字符串", modelName, field)
+			}
+			if field == billing_setting.BillingModeField && text != billing_setting.BillingModeTieredExpr {
+				return nil, fmt.Errorf("模型 %s 的计费模式无效", modelName)
+			}
+			if field == billing_setting.BillingExprField && strings.TrimSpace(text) == "" {
+				return nil, fmt.Errorf("模型 %s 的计费表达式不能为空", modelName)
+			}
+			if field == billing_setting.BillingExprField {
+				if err := billing_setting.SmokeTestExpr(text); err != nil {
+					return nil, fmt.Errorf("模型 %s 的计费表达式无效：%w", modelName, err)
+				}
+			}
+			normalizedFields[field] = text
+		}
+		_, hasBillingMode := normalizedFields[billing_setting.BillingModeField]
+		_, hasBillingExpr := normalizedFields[billing_setting.BillingExprField]
+		if hasBillingMode != hasBillingExpr {
+			return nil, fmt.Errorf("模型 %s 的计费模式和计费表达式必须同时提供", modelName)
+		}
+		normalized[modelName] = normalizedFields
+	}
+	return normalized, nil
+}
+
+func GetModelPricingLocks(c *gin.Context) {
+	locks, err := model.GetModelPricingLocks()
+	if err != nil {
+		logger.LogError(c.Request.Context(), "读取模型价格锁失败："+err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "读取模型价格锁失败"})
+		return
+	}
+	lockedModels := make([]string, 0, len(locks))
+	for modelName := range locks {
+		lockedModels = append(lockedModels, modelName)
+	}
+	sort.Strings(lockedModels)
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": gin.H{"locked_models": lockedModels}})
+}
+
+func UpdateModelPricingLock(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRatioConfigBytes)
+	var req modelPricingLockRequest
+	if err := common.DecodeJson(c.Request.Body, &req); err != nil || req.Locked == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "请求参数格式错误"})
+		return
+	}
+	modelName, err := validateModelName(req.ModelName)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	lockedModels, err := model.SetModelPricingLock(modelName, *req.Locked)
+	if err != nil {
+		logger.LogError(c.Request.Context(), "更新模型价格锁失败："+err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "更新模型价格锁失败"})
+		return
+	}
+	recordManageAudit(c, "model_pricing.lock_update", map[string]interface{}{
+		"model":  modelName,
+		"locked": *req.Locked,
+	})
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    gin.H{"model_name": modelName, "locked": *req.Locked, "locked_models": lockedModels},
+	})
+}
+
+func ApplyModelPricingSync(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRatioConfigBytes)
+	var req applyModelPricingSyncRequest
+	if err := common.DecodeJson(c.Request.Body, &req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "请求参数格式错误"})
+		return
+	}
+	resolutions, err := normalizePricingSyncResolutions(req.Resolutions)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	result, err := model.ApplyModelPricingSync(resolutions)
+	if err != nil {
+		logger.LogError(c.Request.Context(), "应用模型价格同步失败："+err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "应用模型价格同步失败"})
+		return
+	}
+	recordManageAudit(c, "model_pricing.sync_apply", map[string]interface{}{
+		"count":   len(result.AppliedModels),
+		"ignored": len(result.IgnoredLockedModels),
+	})
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data": gin.H{
+			"applied_models":        result.AppliedModels,
+			"ignored_locked_models": result.IgnoredLockedModels,
 		},
 	})
 }

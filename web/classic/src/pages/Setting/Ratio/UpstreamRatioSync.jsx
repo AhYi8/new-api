@@ -237,7 +237,11 @@ export default function UpstreamRatioSync(props) {
         return;
       }
 
-      const { differences = {}, test_results = [] } = res.data.data;
+      const {
+        differences = {},
+        test_results = [],
+        ignored_locked_models = [],
+      } = res.data.data;
 
       const errorResults = test_results.filter((r) => r.status === 'error');
       if (errorResults.length > 0) {
@@ -250,6 +254,14 @@ export default function UpstreamRatioSync(props) {
       setDifferences(differences);
       setResolutions({});
       setHasSynced(true);
+
+      if (ignored_locked_models.length > 0) {
+        showInfo(
+          t('Ignored {{count}} locked models', {
+            count: ignored_locked_models.length,
+          }),
+        );
+      }
 
       if (Object.keys(differences).length === 0) {
         showSuccess(t('未找到差异化价格，无需同步'));
@@ -271,7 +283,6 @@ export default function UpstreamRatioSync(props) {
     'audio_completion_ratio',
   ];
 
-  const numericSyncFields = new Set([...ratioSyncFields, 'model_price']);
   const syncFieldOrder = [
     ...ratioSyncFields,
     'model_price',
@@ -326,18 +337,6 @@ export default function UpstreamRatioSync(props) {
       return 'tiered';
     }
     return 'ratio';
-  }
-
-  function optionKeyBySyncField(ratioType) {
-    const explicit = {
-      billing_mode: 'billing_setting.billing_mode',
-      billing_expr: 'billing_setting.billing_expr',
-    };
-    if (explicit[ratioType]) return explicit[ratioType];
-    return ratioType
-      .split('_')
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-      .join('');
   }
 
   function getUpstreamValue(model, ratioType, sourceName) {
@@ -512,105 +511,66 @@ export default function UpstreamRatioSync(props) {
       return;
     }
 
-    await performSync(currentRatios);
+    await performSync();
   };
 
-  const performSync = useCallback(
-    async (currentRatios) => {
-      const finalRatios = {
-        ModelRatio: { ...currentRatios.ModelRatio },
-        CompletionRatio: { ...currentRatios.CompletionRatio },
-        CacheRatio: { ...currentRatios.CacheRatio },
-        CreateCacheRatio: { ...currentRatios.CreateCacheRatio },
-        ImageRatio: { ...currentRatios.ImageRatio },
-        AudioRatio: { ...currentRatios.AudioRatio },
-        AudioCompletionRatio: { ...currentRatios.AudioCompletionRatio },
-        ModelPrice: { ...currentRatios.ModelPrice },
-        'billing_setting.billing_mode': {
-          ...currentRatios['billing_setting.billing_mode'],
-        },
-        'billing_setting.billing_expr': {
-          ...currentRatios['billing_setting.billing_expr'],
-        },
-      };
-
-      Object.entries(resolutions).forEach(([model, ratios]) => {
-        const selectedTypes = Object.keys(ratios);
-        const hasPrice = selectedTypes.includes('model_price');
-        const hasRatio = selectedTypes.some((rt) =>
-          ratioSyncFields.includes(rt),
-        );
-
-        if (hasPrice) {
-          delete finalRatios.ModelRatio[model];
-          delete finalRatios.CompletionRatio[model];
-          delete finalRatios.CacheRatio[model];
-          delete finalRatios.CreateCacheRatio[model];
-          delete finalRatios.ImageRatio[model];
-          delete finalRatios.AudioRatio[model];
-          delete finalRatios.AudioCompletionRatio[model];
-        }
-        if (hasRatio) {
-          delete finalRatios.ModelPrice[model];
-        }
-
-        Object.entries(ratios).forEach(([ratioType, value]) => {
-          const optionKey = optionKeyBySyncField(ratioType);
-          finalRatios[optionKey][model] = numericSyncFields.has(ratioType)
-            ? parseFloat(value)
-            : value;
-        });
+  const performSync = useCallback(async () => {
+    setLoading(true);
+    showInfo(t('正在同步价格，请稍候'));
+    let success = false;
+    try {
+      const response = await API.post('/api/ratio_sync/apply', {
+        resolutions,
       });
 
-      setLoading(true);
-      showInfo(t('正在同步价格，请稍候'));
-      let success = false;
-      try {
-        const updates = Object.entries(finalRatios).map(([key, value]) =>
-          API.put('/api/option/', {
-            key,
-            value: JSON.stringify(value, null, 2),
-          }),
-        );
+      if (response?.data?.success) {
+        const appliedModels = response.data.data?.applied_models || [];
+        const ignoredLockedModels =
+          response.data.data?.ignored_locked_models || [];
+        showSuccess(t('同步成功'));
+        if (ignoredLockedModels.length > 0) {
+          showInfo(
+            t('Ignored {{count}} models locked during sync', {
+              count: ignoredLockedModels.length,
+            }),
+          );
+        }
+        props.refresh();
 
-        const results = await Promise.all(updates);
+        setDifferences((prevDifferences) => {
+          const newDifferences = { ...prevDifferences };
 
-        if (results.every((res) => res.data.success)) {
-          showSuccess(t('同步成功'));
-          props.refresh();
+          appliedModels.forEach((model) => {
+            const ratios = resolutions[model] || {};
+            Object.keys(ratios).forEach((ratioType) => {
+              if (newDifferences[model] && newDifferences[model][ratioType]) {
+                delete newDifferences[model][ratioType];
 
-          setDifferences((prevDifferences) => {
-            const newDifferences = { ...prevDifferences };
-
-            Object.entries(resolutions).forEach(([model, ratios]) => {
-              Object.keys(ratios).forEach((ratioType) => {
-                if (newDifferences[model] && newDifferences[model][ratioType]) {
-                  delete newDifferences[model][ratioType];
-
-                  if (Object.keys(newDifferences[model]).length === 0) {
-                    delete newDifferences[model];
-                  }
+                if (Object.keys(newDifferences[model]).length === 0) {
+                  delete newDifferences[model];
                 }
-              });
+              }
             });
-
-            return newDifferences;
+          });
+          ignoredLockedModels.forEach((model) => {
+            delete newDifferences[model];
           });
 
-          setResolutions({});
-          success = true;
-        } else {
-          showError(t('部分保存失败'));
-        }
-      } catch (error) {
-        showError(t('保存失败'));
-      } finally {
-        setLoading(false);
+          return newDifferences;
+        });
+
+        setResolutions({});
+        success = true;
+      } else {
+        showError(t('部分保存失败'));
       }
-      return success;
-    },
-    [resolutions, props.options, props.refresh],
-  );
+    } catch (error) {
+      showError(t('保存失败'));
+    } finally {
+      setLoading(false);
+    }
+    return success;
+  }, [resolutions, props.refresh, t]);
 
   const getCurrentPageData = (dataSource) => {
     const startIndex = (currentPage - 1) * pageSize;
@@ -1082,28 +1042,8 @@ export default function UpstreamRatioSync(props) {
         loading={confirmLoading}
         onOk={async () => {
           setConfirmLoading(true);
-          const curRatios = {
-            ModelRatio: JSON.parse(props.options.ModelRatio || '{}'),
-            CompletionRatio: JSON.parse(props.options.CompletionRatio || '{}'),
-            CacheRatio: JSON.parse(props.options.CacheRatio || '{}'),
-            CreateCacheRatio: JSON.parse(
-              props.options.CreateCacheRatio || '{}',
-            ),
-            ImageRatio: JSON.parse(props.options.ImageRatio || '{}'),
-            AudioRatio: JSON.parse(props.options.AudioRatio || '{}'),
-            AudioCompletionRatio: JSON.parse(
-              props.options.AudioCompletionRatio || '{}',
-            ),
-            ModelPrice: JSON.parse(props.options.ModelPrice || '{}'),
-            'billing_setting.billing_mode': JSON.parse(
-              props.options['billing_setting.billing_mode'] || '{}',
-            ),
-            'billing_setting.billing_expr': JSON.parse(
-              props.options['billing_setting.billing_expr'] || '{}',
-            ),
-          };
           try {
-            const success = await performSync(curRatios);
+            const success = await performSync();
             if (success) {
               setConfirmVisible(false);
             }

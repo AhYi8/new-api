@@ -17,12 +17,20 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { ColumnDef } from '@tanstack/react-table'
+import { Loader2, Power, PowerOff } from 'lucide-react'
 
 import { DataTableColumnHeader } from '@/components/data-table/core/column-header'
 import { StaticRowActions } from '@/components/data-table/static/static-row-actions'
 import { StatusBadge } from '@/components/status-badge'
+import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 
+import { isPriceLockActionDisabled } from './model-pricing-locks'
 import {
   getModeLabel,
   getModeVariant,
@@ -42,6 +50,12 @@ const filterBySelectedValues = (
 type BuildModelRatioColumnsOptions = {
   onDelete: (name: string) => void
   onEdit: (model: ModelRow) => void
+  onToggleLock: (name: string, locked: boolean) => void
+  lockedModels: ReadonlySet<string>
+  pendingLockModel?: string
+  lockDisabled: boolean
+  lockStateUnavailable: boolean
+  lockStateLoading: boolean
   deleteDisabled?: boolean
   t: (key: string) => string
 }
@@ -49,6 +63,12 @@ type BuildModelRatioColumnsOptions = {
 export function buildModelRatioColumns({
   onDelete,
   onEdit,
+  onToggleLock,
+  lockedModels,
+  pendingLockModel,
+  lockDisabled,
+  lockStateUnavailable,
+  lockStateLoading,
   deleteDisabled,
   t,
 }: BuildModelRatioColumnsOptions): ColumnDef<ModelRow>[] {
@@ -146,16 +166,65 @@ export function buildModelRatioColumns({
     {
       id: 'actions',
       header: () => <div>{t('Actions')}</div>,
-      cell: ({ row }) => (
-        <StaticRowActions
-          editLabel={t('Edit')}
-          deleteLabel={t('Delete')}
-          menuLabel={t('Open menu')}
-          onEdit={() => onEdit(row.original)}
-          onDelete={() => onDelete(row.original.name)}
-          deleteDisabled={deleteDisabled}
-        />
-      ),
+      cell: ({ row }) => {
+        const locked = lockedModels.has(row.original.name)
+        const pending = pendingLockModel === row.original.name
+        const label = locked ? t('Unlock price') : t('Lock price')
+        const disabled = isPriceLockActionDisabled(
+          locked,
+          lockDisabled,
+          Boolean(pendingLockModel),
+          lockStateUnavailable
+        )
+        let tooltip = label
+        if (lockStateLoading) tooltip = t('Loading...')
+        else if (lockStateUnavailable) {
+          tooltip = t('Failed to load price locks')
+        } else if (!locked && lockDisabled) {
+          tooltip = t('Save price changes before locking')
+        }
+        let lockIcon = <PowerOff />
+        if (locked) lockIcon = <Power />
+        if (pending || lockStateLoading) {
+          lockIcon = <Loader2 className='animate-spin' />
+        }
+
+        return (
+          <div className='flex justify-end gap-1'>
+            <Tooltip>
+              <TooltipTrigger render={<span className='inline-flex' />}>
+                <Button
+                  variant='ghost'
+                  size='icon-sm'
+                  onClick={() => onToggleLock(row.original.name, !locked)}
+                  disabled={disabled}
+                  aria-label={tooltip}
+                  className={
+                    locked
+                      ? 'text-success hover:text-success'
+                      : 'text-destructive hover:text-destructive'
+                  }
+                >
+                  {lockIcon}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{tooltip}</TooltipContent>
+            </Tooltip>
+            <StaticRowActions
+              editLabel={t('Edit')}
+              deleteLabel={t('Delete')}
+              menuLabel={t('Open menu')}
+              onEdit={() => onEdit(row.original)}
+              onDelete={() => onDelete(row.original.name)}
+              deleteDisabled={
+                deleteDisabled ||
+                lockStateUnavailable ||
+                Boolean(pendingLockModel)
+              }
+            />
+          </div>
+        )
+      },
       enableHiding: false,
     },
   ]

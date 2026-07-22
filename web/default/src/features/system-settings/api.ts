@@ -17,11 +17,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from '@/lib/api'
+import i18next from 'i18next'
 
 import type {
+  ApplyModelPricingSyncRequest,
+  ApplyModelPricingSyncResponse,
   ConfirmPaymentComplianceResponse,
   FetchUpstreamRatiosRequest,
   LogCleanupTask,
+  ModelPricingLocksResponse,
   SystemOptionsResponse,
   SystemTaskListResponse,
   SystemTaskResponse,
@@ -29,6 +33,8 @@ import type {
   UpdateOptionResponse,
   UpstreamChannelsResponse,
   UpstreamRatiosResponse,
+  UpdateModelPricingLockRequest,
+  UpdateModelPricingLockResponse,
 } from './types'
 
 export async function getSystemOptions() {
@@ -103,5 +109,41 @@ export async function fetchUpstreamRatios(request: FetchUpstreamRatiosRequest) {
     '/api/ratio_sync/fetch',
     request
   )
+  return res.data
+}
+
+export async function getModelPricingLocks() {
+  const res = await api.get<ModelPricingLocksResponse>('/api/ratio_sync/locks')
+  if (!res.data.success) {
+    throw new Error(res.data.message || i18next.t('Failed to load price locks'))
+  }
+  return res.data
+}
+
+export async function updateModelPricingLock(
+  request: UpdateModelPricingLockRequest
+) {
+  const res = await api.put<UpdateModelPricingLockResponse>(
+    '/api/ratio_sync/lock',
+    request
+  )
+  if (!res.data.success) {
+    throw new Error(
+      res.data.message || i18next.t('Failed to update price lock')
+    )
+  }
+  return res.data
+}
+
+export async function applyModelPricingSync(
+  request: ApplyModelPricingSyncRequest
+) {
+  const res = await api.post<ApplyModelPricingSyncResponse>(
+    '/api/ratio_sync/apply',
+    request
+  )
+  if (!res.data.success) {
+    throw new Error(res.data.message || i18next.t('Failed to sync prices'))
+  }
   return res.data
 }

@@ -4218,6 +4218,16 @@
     "默认折叠侧边栏": "Mặc định thu gọn thanh bên",
     "默认测试模型": "Mô hình kiểm tra mặc định",
     "默认用户消息": "Xin chào",
-    "默认补全倍率": "Tỷ lệ hoàn thành mặc định"
+    "默认补全倍率": "Tỷ lệ hoàn thành mặc định",
+    "Lock price": "Khóa giá",
+    "Unlock price": "Mở khóa giá",
+    "Save price changes before locking": "Hãy lưu thay đổi giá trước khi khóa",
+    "Price locked successfully": "Đã khóa giá",
+    "Price unlocked successfully": "Đã mở khóa giá",
+    "Failed to update price lock": "Không thể cập nhật khóa giá",
+    "Failed to load price locks": "Không thể tải khóa giá",
+    "Failed to clean up orphaned price locks": "Không thể dọn dẹp các khóa giá không còn sử dụng",
+    "Ignored {{count}} locked models": "Đã bỏ qua {{count}} mô hình bị khóa",
+    "Ignored {{count}} models locked during sync": "Đã bỏ qua {{count}} mô hình bị khóa trong khi đồng bộ"
   }
 }

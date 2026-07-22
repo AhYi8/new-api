@@ -3677,6 +3677,16 @@
     "默认折叠侧边栏": "預設摺疊側邊欄",
     "默认测试模型": "預設測試模型",
     "默认用户消息": "你好",
-    "默认补全倍率": "預設補全倍率"
+    "默认补全倍率": "預設補全倍率",
+    "Lock price": "鎖定價格",
+    "Unlock price": "解鎖價格",
+    "Save price changes before locking": "請先儲存價格修改再鎖定",
+    "Price locked successfully": "價格鎖定成功",
+    "Price unlocked successfully": "價格解鎖成功",
+    "Failed to update price lock": "更新價格鎖失敗",
+    "Failed to load price locks": "載入價格鎖失敗",
+    "Failed to clean up orphaned price locks": "清理孤立價格鎖失敗",
+    "Ignored {{count}} locked models": "已忽略 {{count}} 個鎖定模型",
+    "Ignored {{count}} models locked during sync": "同步時另有 {{count}} 個模型被鎖定，已忽略"
   }
 }

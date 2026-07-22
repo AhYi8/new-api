@@ -91,6 +91,7 @@ type ModelPricingSheetProps = {
   editData?: ModelRatioData | null
   onSave?: () => void | Promise<void>
   isSaving?: boolean
+  onDirtyChange?: (dirty: boolean) => void
 }
 
 type ModelPricingEditorPanelProps = Omit<
@@ -108,7 +109,7 @@ export const ModelPricingSheet = forwardRef<
   ModelPricingEditorPanelHandle,
   ModelPricingSheetProps
 >(function ModelPricingSheet(
-  { open, onOpenChange, editData, onSave, isSaving },
+  { open, onOpenChange, editData, onSave, isSaving, onDirtyChange },
   ref
 ) {
   const { t } = useTranslation()
@@ -130,6 +131,7 @@ export const ModelPricingSheet = forwardRef<
           editData={editData}
           onSave={onSave}
           isSaving={isSaving}
+          onDirtyChange={onDirtyChange}
           className='h-full rounded-none border-0'
         />
       </SheetContent>
@@ -141,7 +143,7 @@ export const ModelPricingEditorPanel = forwardRef<
   ModelPricingEditorPanelHandle,
   ModelPricingEditorPanelProps
 >(function ModelPricingEditorPanel(
-  { editData, className, onSave, isSaving },
+  { editData, className, onSave, isSaving, onDirtyChange },
   ref
 ) {
   const { t } = useTranslation()
@@ -188,13 +190,13 @@ export const ModelPricingEditorPanel = forwardRef<
         audioRatio: editData.audioRatio || '',
         audioCompletionRatio: editData.audioCompletionRatio || '',
       })
-      setPricingMode(
-        editData.billingMode === 'tiered_expr'
-          ? 'tiered_expr'
-          : editData.price
-            ? 'per-request'
-            : 'per-token'
-      )
+      let nextPricingMode: PricingMode = 'per-token'
+      if (editData.billingMode === 'tiered_expr') {
+        nextPricingMode = 'tiered_expr'
+      } else if (editData.price) {
+        nextPricingMode = 'per-request'
+      }
+      setPricingMode(nextPricingMode)
       setBillingExpr(editData.billingExpr || '')
       setRequestRuleExpr(editData.requestRuleExpr || '')
     } else {
@@ -219,6 +221,27 @@ export const ModelPricingEditorPanel = forwardRef<
     setLaneEnabled(nextLaneState.enabled)
     setEditorReloadToken((token) => token + 1)
   }, [editData, form])
+
+  useEffect(() => {
+    let initialMode: PricingMode = 'per-token'
+    if (editData?.billingMode === 'tiered_expr') {
+      initialMode = 'tiered_expr'
+    } else if (editData?.price) {
+      initialMode = 'per-request'
+    }
+    const tieredFieldsChanged =
+      pricingMode !== initialMode ||
+      billingExpr !== (editData?.billingExpr || '') ||
+      requestRuleExpr !== (editData?.requestRuleExpr || '')
+    onDirtyChange?.(form.formState.isDirty || tieredFieldsChanged)
+  }, [
+    billingExpr,
+    editData,
+    form.formState.isDirty,
+    onDirtyChange,
+    pricingMode,
+    requestRuleExpr,
+  ])
 
   const setFormValue = (field: keyof ModelPricingFormValues, value: string) => {
     form.setValue(field, value, {

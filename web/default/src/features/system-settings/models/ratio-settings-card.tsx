@@ -27,11 +27,16 @@ import * as z from 'zod'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
-import { resetModelRatios } from '../api'
+import {
+  getModelPricingLocks,
+  resetModelRatios,
+  updateModelPricingLock,
+} from '../api'
 import { SettingsPageTitleStatusPortal } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
 import { GroupRatioForm } from './group-ratio-form'
+import { getConfiguredPricingModelNames } from './model-pricing-locks'
 import { ModelRatioForm } from './model-ratio-form'
 import { ToolPriceSettings } from './tool-price-settings'
 import { UpstreamRatioSync } from './upstream-ratio-sync'
@@ -343,13 +348,52 @@ export function RatioSettingsCard({
 
       for (const key of updates) {
         const apiKey = apiKeyMap[key as string] || (key as string)
-        await updateOption.mutateAsync({ key: apiKey, value: normalized[key] })
+        const response = await updateOption.mutateAsync({
+          key: apiKey,
+          value: normalized[key],
+        })
+        if (!response.success) {
+          throw new Error(response.message || t('Failed to update setting'))
+        }
+      }
+
+      try {
+        const configuredModels = getConfiguredPricingModelNames([
+          normalized.ModelPrice,
+          normalized.ModelRatio,
+          normalized.CacheRatio,
+          normalized.CreateCacheRatio,
+          normalized.CompletionRatio,
+          normalized.ImageRatio,
+          normalized.AudioRatio,
+          normalized.AudioCompletionRatio,
+          normalized.BillingMode,
+          normalized.BillingExpr,
+        ])
+        const locksResponse = await getModelPricingLocks()
+        const orphanLocks = locksResponse.data.locked_models.filter(
+          (model) => !configuredModels.has(model)
+        )
+        await Promise.all(
+          orphanLocks.map((model) =>
+            updateModelPricingLock({ model_name: model, locked: false })
+          )
+        )
+        if (orphanLocks.length > 0) {
+          queryClient.invalidateQueries({ queryKey: ['model-pricing-locks'] })
+        }
+      } catch {
+        toast.warning(
+          t(
+            'Model prices were saved, but stale price locks could not be cleaned up'
+          )
+        )
       }
 
       modelNormalizedDefaults.current = normalized
       setSavedModelValues(normalized)
     },
-    [t, updateOption]
+    [queryClient, t, updateOption]
   )
 
   const saveGroupRatios = useCallback(

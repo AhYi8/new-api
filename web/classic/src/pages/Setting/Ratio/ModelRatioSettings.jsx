@@ -37,6 +37,22 @@ import {
 } from '../../../helpers';
 import { useTranslation } from 'react-i18next';
 
+const getConfiguredModelNames = (serializedMaps) => {
+  const names = new Set();
+  serializedMaps.forEach((raw) => {
+    if (typeof raw !== 'string') return;
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+        return;
+      Object.keys(parsed).forEach((name) => names.add(name));
+    } catch {
+      // 表单校验会阻止非法 JSON 保存，此处仅避免清理锁时扩大失败范围。
+    }
+  });
+  return names;
+};
+
 export default function ModelRatioSettings(props) {
   const [loading, setLoading] = useState(false);
   const [inputs, setInputs] = useState({
@@ -73,7 +89,7 @@ export default function ModelRatioSettings(props) {
 
           setLoading(true);
           Promise.all(requestQueue)
-            .then((res) => {
+            .then(async (res) => {
               if (res.includes(undefined)) {
                 return showError(
                   requestQueue.length > 1
@@ -86,6 +102,48 @@ export default function ModelRatioSettings(props) {
                 if (!res[i].data.success) {
                   return showError(res[i].data.message);
                 }
+              }
+
+              try {
+                const configuredModels = getConfiguredModelNames([
+                  inputs.ModelPrice,
+                  inputs.ModelRatio,
+                  inputs.CacheRatio,
+                  inputs.CreateCacheRatio,
+                  inputs.CompletionRatio,
+                  inputs.ImageRatio,
+                  inputs.AudioRatio,
+                  inputs.AudioCompletionRatio,
+                  props.options['billing_setting.billing_mode'],
+                  props.options['billing_setting.billing_expr'],
+                ]);
+                const locksResponse = await API.get('/api/ratio_sync/locks', {
+                  skipErrorHandler: true,
+                });
+                if (!locksResponse?.data?.success) {
+                  throw new Error('price lock query failed');
+                }
+                const orphanLocks = (
+                  locksResponse.data.data?.locked_models || []
+                ).filter((model) => !configuredModels.has(model));
+                const unlockResults = await Promise.all(
+                  orphanLocks.map((model) =>
+                    API.put(
+                      '/api/ratio_sync/lock',
+                      {
+                        model_name: model,
+                        locked: false,
+                      },
+                      { skipErrorHandler: true },
+                    ),
+                  ),
+                );
+                if (unlockResults.some((result) => !result?.data?.success)) {
+                  throw new Error('price lock cleanup failed');
+                }
+              } catch (error) {
+                console.error(error);
+                showWarning(t('Failed to clean up orphaned price locks'));
               }
 
               showSuccess(t('保存成功'));

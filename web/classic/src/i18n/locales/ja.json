@@ -3653,6 +3653,16 @@
     "默认折叠侧边栏": "サイドバーをデフォルトで折りたたむ",
     "默认测试模型": "デフォルトテストモデル",
     "默认用户消息": "こんにちは",
-    "默认补全倍率": "デフォルト補完倍率"
+    "默认补全倍率": "デフォルト補完倍率",
+    "Lock price": "価格をロック",
+    "Unlock price": "価格のロックを解除",
+    "Save price changes before locking": "ロックする前に価格変更を保存してください",
+    "Price locked successfully": "価格をロックしました",
+    "Price unlocked successfully": "価格のロックを解除しました",
+    "Failed to update price lock": "価格ロックの更新に失敗しました",
+    "Failed to load price locks": "価格ロックの読み込みに失敗しました",
+    "Failed to clean up orphaned price locks": "孤立した価格ロックのクリーンアップに失敗しました",
+    "Ignored {{count}} locked models": "{{count}} 個のロック済みモデルを無視しました",
+    "Ignored {{count}} models locked during sync": "同期中にロックされた {{count}} 個のモデルを無視しました"
   }
 }

@@ -3684,6 +3684,16 @@
     "默认折叠侧边栏": "Réduire la barre latérale par défaut",
     "默认测试模型": "Modèle de test par défaut",
     "默认用户消息": "Bonjour",
-    "默认补全倍率": "Taux de complétion par défaut"
+    "默认补全倍率": "Taux de complétion par défaut",
+    "Lock price": "Verrouiller le prix",
+    "Unlock price": "Déverrouiller le prix",
+    "Save price changes before locking": "Enregistrez les modifications de prix avant de verrouiller",
+    "Price locked successfully": "Prix verrouillé",
+    "Price unlocked successfully": "Prix déverrouillé",
+    "Failed to update price lock": "Échec de la mise à jour du verrou de prix",
+    "Failed to load price locks": "Échec du chargement des verrouillages de prix",
+    "Failed to clean up orphaned price locks": "Échec du nettoyage des verrouillages de prix orphelins",
+    "Ignored {{count}} locked models": "{{count}} modèles verrouillés ont été ignorés",
+    "Ignored {{count}} models locked during sync": "{{count}} modèles verrouillés pendant la synchronisation ont été ignorés"
   }
 }

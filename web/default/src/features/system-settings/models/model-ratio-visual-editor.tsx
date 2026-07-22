@@ -1,3 +1,4 @@
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -50,8 +51,10 @@ import { Button } from '@/components/ui/button'
 import { combineBillingExpr } from '@/features/pricing/lib/billing-expr'
 import { useMediaQuery } from '@/hooks'
 
+import { getModelPricingLocks, updateModelPricingLock } from '../api'
 import { safeJsonParse } from '../utils/json-parser'
 import type { PricingMode } from './model-pricing-core'
+import { normalizeLockedModels } from './model-pricing-locks'
 import {
   ModelPricingEditorPanel,
   type ModelPricingEditorPanelHandle,
@@ -136,15 +139,27 @@ const ModelRatioVisualEditorComponent = forwardRef<
   ref
 ) {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const isMobile = useMediaQuery('(max-width: 767px)')
   const [sheetOpen, setSheetOpen] = useState(false)
   const [editorOpen, setEditorOpen] = useState(false)
   const [editData, setEditData] = useState<ModelRatioData | null>(null)
+  const [editorDirty, setEditorDirty] = useState(false)
+  const [pendingLockModel, setPendingLockModel] = useState<string>()
   const [sorting, setSorting] = useState<SortingState>([])
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
   const [globalFilter, setGlobalFilter] = useState('')
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
   const editorPanelRef = useRef<ModelPricingEditorPanelHandle>(null)
+  const locksQuery = useQuery({
+    queryKey: ['model-pricing-locks'],
+    queryFn: getModelPricingLocks,
+  })
+  const lockedModels = useMemo(
+    () => new Set(normalizeLockedModels(locksQuery.data?.data.locked_models)),
+    [locksQuery.data?.data.locked_models]
+  )
+  const lockStateUnavailable = locksQuery.isPending || locksQuery.isError
   const [pagination, setPagination] = useState<PaginationState>({
     pageIndex: 0,
     pageSize: 20,
@@ -311,6 +326,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
         billingExpr: editableModel.billingExpr,
         requestRuleExpr: editableModel.requestRuleExpr,
       })
+      setEditorDirty(false)
       setEditorOpen(true)
       if (isMobile) setSheetOpen(true)
     },
@@ -319,6 +335,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
 
   const handleAdd = useCallback(() => {
     setEditData(null)
+    setEditorDirty(false)
     setEditorOpen(true)
     if (isMobile) setSheetOpen(true)
   }, [isMobile])
@@ -329,6 +346,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
         const next = typeof updater === 'function' ? updater(previous) : updater
         if (next !== previous) {
           setEditData(null)
+          setEditorDirty(false)
           setEditorOpen(false)
           setSheetOpen(false)
         }
@@ -338,7 +356,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
     []
   )
 
-  const handleDelete = useCallback(
+  const removeModel = useCallback(
     (name: string) => {
       const priceMap = safeJsonParse<Record<string, number>>(modelPrice, {
         fallback: {},
@@ -414,6 +432,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
 
       if (editData?.name === name) {
         setEditData(null)
+        setEditorDirty(false)
         setEditorOpen(false)
         setSheetOpen(false)
       }
@@ -434,15 +453,113 @@ const ModelRatioVisualEditorComponent = forwardRef<
     ]
   )
 
+  const hasUnsavedPricingChanges =
+    editorDirty || models.some((model) => model.isDraftChanged)
+
+  const handleToggleLock = useCallback(
+    async (name: string, locked: boolean) => {
+      if (lockStateUnavailable || pendingLockModel) return
+      if (locked && hasUnsavedPricingChanges) {
+        toast.warning(t('Save price changes before locking'))
+        return
+      }
+      setPendingLockModel(name)
+      try {
+        const response = await updateModelPricingLock({
+          model_name: name,
+          locked,
+        })
+        if (!response.success) {
+          throw new Error(response.message || t('Failed to update price lock'))
+        }
+        queryClient.setQueryData(['model-pricing-locks'], response)
+        queryClient.invalidateQueries({ queryKey: ['model-pricing-locks'] })
+        toast.success(
+          locked
+            ? t('Price locked successfully')
+            : t('Price unlocked successfully')
+        )
+      } catch (error) {
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : t('Failed to update price lock')
+        )
+      } finally {
+        setPendingLockModel(undefined)
+      }
+    },
+    [
+      hasUnsavedPricingChanges,
+      lockStateUnavailable,
+      pendingLockModel,
+      queryClient,
+      t,
+    ]
+  )
+
+  const handleDelete = useCallback(
+    async (name: string) => {
+      if (lockStateUnavailable || pendingLockModel) return
+      if (lockedModels.has(name)) {
+        setPendingLockModel(name)
+        try {
+          const response = await updateModelPricingLock({
+            model_name: name,
+            locked: false,
+          })
+          if (!response.success) {
+            throw new Error(response.message || t('Failed to unlock price'))
+          }
+          queryClient.setQueryData(['model-pricing-locks'], response)
+          queryClient.invalidateQueries({ queryKey: ['model-pricing-locks'] })
+        } catch (error) {
+          toast.error(
+            error instanceof Error ? error.message : t('Failed to unlock price')
+          )
+          setPendingLockModel(undefined)
+          return
+        }
+        setPendingLockModel(undefined)
+      }
+      removeModel(name)
+    },
+    [
+      lockedModels,
+      lockStateUnavailable,
+      pendingLockModel,
+      queryClient,
+      removeModel,
+      t,
+    ]
+  )
+
   const columns = useMemo(
     () =>
       buildModelRatioColumns({
         onDelete: handleDelete,
         onEdit: handleEdit,
+        onToggleLock: handleToggleLock,
+        lockedModels,
+        pendingLockModel,
+        lockDisabled: hasUnsavedPricingChanges,
+        lockStateUnavailable,
+        lockStateLoading: locksQuery.isPending,
         deleteDisabled: filterMode === 'unset',
         t,
       }),
-    [handleEdit, handleDelete, filterMode, t]
+    [
+      handleEdit,
+      handleDelete,
+      handleToggleLock,
+      hasUnsavedPricingChanges,
+      lockedModels,
+      pendingLockModel,
+      lockStateUnavailable,
+      locksQuery.isPending,
+      filterMode,
+      t,
+    ]
   )
 
   const ensurePageInRange = useCallback((pageCount: number) => {
@@ -779,6 +896,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
               editData={editData}
               onSave={onSave}
               isSaving={isSaving}
+              onDirtyChange={setEditorDirty}
               className='h-full min-h-0'
             />
           ) : (
@@ -819,6 +937,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
           editData={editData}
           onSave={onSave}
           isSaving={isSaving}
+          onDirtyChange={setEditorDirty}
         />
       )}
     </div>

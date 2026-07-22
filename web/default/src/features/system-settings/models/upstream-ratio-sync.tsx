@@ -25,9 +25,9 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 
 import {
+  applyModelPricingSync,
   fetchUpstreamRatios,
   getUpstreamChannels,
-  updateSystemOption,
 } from '../api'
 import type {
   DifferencesMap,
@@ -49,8 +49,8 @@ import {
   OPENROUTER_CHANNEL_TYPE,
   OPENROUTER_ENDPOINT,
 } from './constants'
+import { applyPricingSyncResult } from './model-pricing-locks'
 import {
-  NUMERIC_SYNC_FIELDS,
   RATIO_SYNC_FIELDS,
   applyResolutionRemovalPlan,
   applyResolutionSelection,
@@ -93,18 +93,6 @@ function getDefaultEndpointForChannel(channel: UpstreamChannel): string {
   if (channel.id === OFFICIAL_CHANNEL_ID) return OFFICIAL_CHANNEL_ENDPOINT
   if (channel.type === OPENROUTER_CHANNEL_TYPE) return OPENROUTER_ENDPOINT
   return DEFAULT_ENDPOINT
-}
-
-function optionKeyBySyncField(ratioType: string): string {
-  const explicit: Record<string, string> = {
-    billing_mode: 'billing_setting.billing_mode',
-    billing_expr: 'billing_setting.billing_expr',
-  }
-  if (explicit[ratioType]) return explicit[ratioType]
-  return ratioType
-    .split('_')
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join('')
 }
 
 function parseJsonRecord<T>(raw: string | undefined | null): Record<string, T> {
@@ -168,7 +156,11 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
         return
       }
 
-      const { differences: diffs, test_results } = data.data
+      const {
+        differences: diffs,
+        test_results,
+        ignored_locked_models: ignoredLockedModels,
+      } = data.data
 
       const errorResults = test_results.filter((r) => r.status === 'error')
       if (errorResults.length > 0) {
@@ -180,6 +172,14 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
 
       setDifferences(diffs)
       setResolutions({})
+
+      if (ignoredLockedModels.length > 0) {
+        toast.info(
+          t('Ignored {{count}} locked models', {
+            count: ignoredLockedModels.length,
+          })
+        )
+      }
 
       if (Object.keys(diffs).length === 0) {
         toast.success(t('No price differences found'))
@@ -193,28 +193,30 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
   })
 
   const { mutate: syncMutate, isPending: isSyncPending } = useMutation({
-    mutationFn: async (updates: Array<{ key: string; value: string }>) => {
-      for (const update of updates) {
-        await updateSystemOption(update)
+    mutationFn: applyModelPricingSync,
+    onSuccess: (data) => {
+      if (!data.success) {
+        toast.error(data.message || t('Failed to sync prices'))
+        return
       }
-    },
-    onSuccess: () => {
       toast.success(t('Prices synced successfully'))
+      if (data.data.ignored_locked_models.length > 0) {
+        toast.info(
+          t('Ignored {{count}} models locked during sync', {
+            count: data.data.ignored_locked_models.length,
+          })
+        )
+      }
       queryClient.invalidateQueries({ queryKey: ['system-options'] })
+      queryClient.invalidateQueries({ queryKey: ['model-pricing-locks'] })
 
       setDifferences((prevDiffs) => {
-        const newDiffs = { ...prevDiffs }
-        Object.entries(resolutions).forEach(([model, ratios]) => {
-          Object.keys(ratios).forEach((ratioType) => {
-            if (newDiffs[model]?.[ratioType as RatioType]) {
-              delete newDiffs[model][ratioType as RatioType]
-              if (Object.keys(newDiffs[model]).length === 0) {
-                delete newDiffs[model]
-              }
-            }
-          })
-        })
-        return newDiffs
+        return applyPricingSyncResult(
+          prevDiffs,
+          resolutions,
+          data.data.applied_models,
+          data.data.ignored_locked_models
+        )
       })
 
       setResolutions({})
@@ -331,67 +333,17 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
     return null
   }
 
-  const performSync = useCallback(
-    async (currentRatios: ParsedRatios): Promise<boolean> => {
-      const finalRatios: Record<string, Record<string, number | string>> = {
-        ModelRatio: { ...currentRatios.ModelRatio },
-        CompletionRatio: { ...currentRatios.CompletionRatio },
-        CacheRatio: { ...currentRatios.CacheRatio },
-        CreateCacheRatio: { ...currentRatios.CreateCacheRatio },
-        ImageRatio: { ...currentRatios.ImageRatio },
-        AudioRatio: { ...currentRatios.AudioRatio },
-        AudioCompletionRatio: { ...currentRatios.AudioCompletionRatio },
-        ModelPrice: { ...currentRatios.ModelPrice },
-        'billing_setting.billing_mode': {
-          ...currentRatios['billing_setting.billing_mode'],
-        },
-        'billing_setting.billing_expr': {
-          ...currentRatios['billing_setting.billing_expr'],
-        },
-      }
-
-      Object.entries(resolutions).forEach(([model, ratios]) => {
-        const selectedTypes = Object.keys(ratios)
-        const hasPrice = selectedTypes.includes('model_price')
-        const hasRatio = selectedTypes.some((rt) =>
-          RATIO_SYNC_FIELDS.includes(rt as RatioType)
-        )
-
-        if (hasPrice) {
-          delete finalRatios.ModelRatio[model]
-          delete finalRatios.CompletionRatio[model]
-          delete finalRatios.CacheRatio[model]
-          delete finalRatios.CreateCacheRatio[model]
-          delete finalRatios.ImageRatio[model]
-          delete finalRatios.AudioRatio[model]
-          delete finalRatios.AudioCompletionRatio[model]
-        }
-        if (hasRatio) {
-          delete finalRatios.ModelPrice[model]
-        }
-
-        Object.entries(ratios).forEach(([ratioType, value]) => {
-          const optionKey = optionKeyBySyncField(ratioType)
-          finalRatios[optionKey][model] = NUMERIC_SYNC_FIELDS.has(ratioType)
-            ? Number(value)
-            : value
-        })
-      })
-
-      const updates = Object.entries(finalRatios).map(([key, value]) => ({
-        key,
-        value: JSON.stringify(value, null, 2),
-      }))
-
-      return new Promise<boolean>((resolve) => {
-        syncMutate(updates, {
+  const performSync = useCallback(async (): Promise<boolean> => {
+    return new Promise<boolean>((resolve) => {
+      syncMutate(
+        { resolutions },
+        {
           onSuccess: () => resolve(true),
           onError: () => resolve(false),
-        })
-      })
-    },
-    [resolutions, syncMutate]
-  )
+        }
+      )
+    })
+  }, [resolutions, syncMutate])
 
   const findSourceChannel = (
     model: string,
@@ -456,13 +408,13 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
     }
 
     toast.info(t('Syncing prices, please wait...'))
-    performSync(currentRatios)
+    performSync()
   }
 
   const handleConfirmConflict = async () => {
     setConfirmLoading(true)
     try {
-      const success = await performSync(parsedRatios)
+      const success = await performSync()
       if (success) {
         setConflictDialogOpen(false)
       }

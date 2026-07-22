@@ -3830,6 +3830,16 @@
     "默认折叠侧边栏": "Default collapse sidebar",
     "默认测试模型": "Default Test Model",
     "默认用户消息": "Default User Message",
-    "默认补全倍率": "Default completion ratio"
+    "默认补全倍率": "Default completion ratio",
+    "Lock price": "Lock price",
+    "Unlock price": "Unlock price",
+    "Save price changes before locking": "Save price changes before locking",
+    "Price locked successfully": "Price locked successfully",
+    "Price unlocked successfully": "Price unlocked successfully",
+    "Failed to update price lock": "Failed to update price lock",
+    "Failed to load price locks": "Failed to load price locks",
+    "Failed to clean up orphaned price locks": "Failed to clean up orphaned price locks",
+    "Ignored {{count}} locked models": "Ignored {{count}} locked models",
+    "Ignored {{count}} models locked during sync": "Ignored {{count}} models locked during sync"
   }
 }

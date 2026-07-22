@@ -3813,6 +3813,16 @@
     "默认折叠侧边栏": "默认折叠侧边栏",
     "默认测试模型": "默认测试模型",
     "默认用户消息": "你好",
-    "默认补全倍率": "默认补全倍率"
+    "默认补全倍率": "默认补全倍率",
+    "Lock price": "锁定价格",
+    "Unlock price": "解锁价格",
+    "Save price changes before locking": "请先保存价格修改再锁定",
+    "Price locked successfully": "价格锁定成功",
+    "Price unlocked successfully": "价格解锁成功",
+    "Failed to update price lock": "更新价格锁失败",
+    "Failed to load price locks": "加载价格锁失败",
+    "Failed to clean up orphaned price locks": "清理孤立价格锁失败",
+    "Ignored {{count}} locked models": "已忽略 {{count}} 个锁定模型",
+    "Ignored {{count}} models locked during sync": "同步时又有 {{count}} 个模型被锁定，已忽略"
   }
 }

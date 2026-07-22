@@ -225,7 +225,8 @@ const buildModelState = (name, sourceMaps) => {
 
 export const isBasePricingUnset = (model) =>
   model.billingMode !== 'tiered_expr' &&
-  !hasValue(model.fixedPrice) && !hasValue(model.inputPrice);
+  !hasValue(model.fixedPrice) &&
+  !hasValue(model.inputPrice);
 
 export const getModelWarnings = (model, t) => {
   if (!model) {
@@ -291,8 +292,8 @@ export const getModelWarnings = (model, t) => {
 export const buildSummaryText = (model, t) => {
   const requestRuleSuffix =
     model.billingMode === 'tiered_expr' && model.requestRuleExpr
-    ? `，${t('请求规则')}`
-    : '';
+      ? `，${t('请求规则')}`
+      : '';
   if (model.billingMode === 'tiered_expr') {
     const expr = model.billingExpr;
     if (!expr) return `${t('表达式计费')}${requestRuleSuffix}`;
@@ -632,6 +633,7 @@ export function useModelPricingEditorState({
   const [searchText, setSearchText] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [isDirty, setIsDirty] = useState(false);
   const [conflictOnly, setConflictOnly] = useState(false);
   const [optionalFieldToggles, setOptionalFieldToggles] = useState({});
 
@@ -646,8 +648,12 @@ export function useModelPricingEditorState({
       ImageRatio: parseOptionJSON(options.ImageRatio),
       AudioRatio: parseOptionJSON(options.AudioRatio),
       AudioCompletionRatio: parseOptionJSON(options.AudioCompletionRatio),
-      ModelBillingMode: parseOptionJSON(options['billing_setting.billing_mode']),
-      ModelBillingExpr: parseOptionJSON(options['billing_setting.billing_expr']),
+      ModelBillingMode: parseOptionJSON(
+        options['billing_setting.billing_mode'],
+      ),
+      ModelBillingExpr: parseOptionJSON(
+        options['billing_setting.billing_expr'],
+      ),
     };
 
     const names = new Set([
@@ -670,6 +676,7 @@ export function useModelPricingEditorState({
       .sort((a, b) => a.name.localeCompare(b.name));
 
     setModels(nextModels);
+    setIsDirty(false);
     setInitialVisibleModelNames(
       filterMode === 'unset'
         ? nextModels
@@ -756,6 +763,7 @@ export function useModelPricingEditorState({
   }, [selectedModelName, visibleModels]);
 
   const upsertModel = (name, updater) => {
+    setIsDirty(true);
     setModels((previous) =>
       previous.map((model) => {
         if (model.name !== name) return model;
@@ -774,6 +782,7 @@ export function useModelPricingEditorState({
   };
 
   const updateOptionalFieldToggle = (modelName, field, checked) => {
+    setIsDirty(true);
     setOptionalFieldToggles((prev) => ({
       ...prev,
       [modelName]: {
@@ -917,6 +926,7 @@ export function useModelPricingEditorState({
     };
 
     setModels((previous) => [nextModel, ...previous]);
+    setIsDirty(true);
     setOptionalFieldToggles((prev) => ({
       ...prev,
       [trimmedName]: buildOptionalFieldToggles(nextModel),
@@ -929,6 +939,7 @@ export function useModelPricingEditorState({
   const deleteModel = (name) => {
     const nextModels = models.filter((model) => model.name !== name);
     setModels(nextModels);
+    setIsDirty(true);
     setOptionalFieldToggles((prev) => {
       const next = { ...prev };
       delete next[name];
@@ -991,6 +1002,7 @@ export function useModelPricingEditorState({
       }),
     );
 
+    setIsDirty(true);
     setOptionalFieldToggles((previous) => {
       const next = { ...previous };
       selectedModelNames.forEach((modelName) => {
@@ -1046,8 +1058,10 @@ export function useModelPricingEditorState({
             model.requestRuleExpr,
           );
           if (finalBillingExpr) {
-            tieredOutput['billing_setting.billing_mode'][model.name] = 'tiered_expr';
-            tieredOutput['billing_setting.billing_expr'][model.name] = finalBillingExpr;
+            tieredOutput['billing_setting.billing_mode'][model.name] =
+              'tiered_expr';
+            tieredOutput['billing_setting.billing_expr'][model.name] =
+              finalBillingExpr;
           }
         }
 
@@ -1092,6 +1106,7 @@ export function useModelPricingEditorState({
       }
 
       showSuccess(t('保存成功'));
+      setIsDirty(false);
       await refresh();
     } catch (error) {
       console.error('保存失败:', error);
@@ -1113,6 +1128,7 @@ export function useModelPricingEditorState({
     currentPage,
     setCurrentPage,
     loading,
+    isDirty,
     conflictOnly,
     setConflictOnly,
     filteredModels,

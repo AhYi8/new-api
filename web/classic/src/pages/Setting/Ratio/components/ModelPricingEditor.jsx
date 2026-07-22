@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Banner,
   Button,
@@ -32,8 +32,10 @@ import {
   Switch,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from '@douyinfe/semi-ui';
+import { Loader2, Power, PowerOff } from 'lucide-react';
 import {
   IconDelete,
   IconPlus,
@@ -49,6 +51,7 @@ import {
   useModelPricingEditorState,
 } from '../hooks/useModelPricingEditorState';
 import { useIsMobile } from '../../../../hooks/common/useIsMobile';
+import { API, showError, showSuccess } from '../../../../helpers';
 import TieredPricingEditor from './TieredPricingEditor';
 
 const { Text } = Typography;
@@ -102,6 +105,10 @@ export default function ModelPricingEditor({
   const [addVisible, setAddVisible] = useState(false);
   const [batchVisible, setBatchVisible] = useState(false);
   const [newModelName, setNewModelName] = useState('');
+  const [lockedModels, setLockedModels] = useState([]);
+  const [pendingLockModel, setPendingLockModel] = useState('');
+  const [locksReady, setLocksReady] = useState(false);
+  const [locksLoading, setLocksLoading] = useState(true);
 
   const {
     selectedModel,
@@ -114,6 +121,7 @@ export default function ModelPricingEditor({
     currentPage,
     setCurrentPage,
     loading,
+    isDirty,
     conflictOnly,
     setConflictOnly,
     filteredModels,
@@ -138,14 +146,98 @@ export default function ModelPricingEditor({
     filterMode,
   });
 
-  const getExprModeLabel = useCallback((model) => {
-    if (model?.billingMode !== 'tiered_expr') {
-      return '';
+  const refreshLocks = useCallback(async () => {
+    setLocksLoading(true);
+    setLocksReady(false);
+    try {
+      const response = await API.get('/api/ratio_sync/locks', {
+        skipErrorHandler: true,
+      });
+      if (!response?.data?.success) {
+        throw new Error(
+          response?.data?.message || t('Failed to load price locks'),
+        );
+      }
+      setLockedModels(response.data.data?.locked_models || []);
+      setLocksReady(true);
+    } catch (error) {
+      console.error(error);
+      showError(t('Failed to load price locks'));
+    } finally {
+      setLocksLoading(false);
     }
-    return (model.billingExpr || '').includes('tier(')
-      ? t('阶梯计费')
-      : t('表达式计费');
   }, [t]);
+
+  useEffect(() => {
+    refreshLocks();
+  }, [refreshLocks]);
+
+  const handleLockChange = useCallback(
+    async (modelName, locked, showResult = true) => {
+      if (!locksReady || pendingLockModel) return false;
+      if (locked && isDirty) {
+        showError(t('Save price changes before locking'));
+        return false;
+      }
+
+      setPendingLockModel(modelName);
+      try {
+        const response = await API.put(
+          '/api/ratio_sync/lock',
+          {
+            model_name: modelName,
+            locked,
+          },
+          { skipErrorHandler: true },
+        );
+        if (!response?.data?.success) {
+          throw new Error(
+            response?.data?.message || t('Failed to update price lock'),
+          );
+        }
+        setLockedModels(response.data.data?.locked_models || []);
+        if (showResult) {
+          showSuccess(
+            locked
+              ? t('Price locked successfully')
+              : t('Price unlocked successfully'),
+          );
+        }
+        return true;
+      } catch (error) {
+        console.error(error);
+        showError(t('Failed to update price lock'));
+        return false;
+      } finally {
+        setPendingLockModel('');
+      }
+    },
+    [isDirty, locksReady, pendingLockModel, t],
+  );
+
+  const handleDeleteModel = useCallback(
+    async (modelName) => {
+      if (!locksReady || pendingLockModel) return;
+      if (lockedModels.includes(modelName)) {
+        const unlocked = await handleLockChange(modelName, false, false);
+        if (!unlocked) return;
+      }
+      deleteModel(modelName);
+    },
+    [deleteModel, handleLockChange, lockedModels, locksReady, pendingLockModel],
+  );
+
+  const getExprModeLabel = useCallback(
+    (model) => {
+      if (model?.billingMode !== 'tiered_expr') {
+        return '';
+      }
+      return (model.billingExpr || '').includes('tier(')
+        ? t('阶梯计费')
+        : t('表达式计费');
+    },
+    [t],
+  );
 
   const columns = useMemo(
     () => [
@@ -213,23 +305,71 @@ export default function ModelPricingEditor({
       {
         title: t('操作'),
         key: 'action',
-        render: (_, record) => (
-          <Space>
-            {allowDeleteModel ? (
-              <Button
-                size='small'
-                type='danger'
-                icon={<IconDelete />}
-                onClick={() => deleteModel(record.name)}
-              />
-            ) : null}
-          </Space>
-        ),
+        render: (_, record) => {
+          const locked = lockedModels.includes(record.name);
+          const pending = pendingLockModel === record.name;
+          const lockLabel = locked ? t('Unlock price') : t('Lock price');
+          let tooltip = lockLabel;
+          if (locksLoading) tooltip = t('加载中...');
+          else if (!locksReady) tooltip = t('Failed to load price locks');
+          else if (!locked && isDirty) {
+            tooltip = t('Save price changes before locking');
+          }
+          return (
+            <Space>
+              <Tooltip content={tooltip}>
+                <span>
+                  <Button
+                    size='small'
+                    type='tertiary'
+                    theme='borderless'
+                    style={{
+                      color: locked
+                        ? 'var(--semi-color-success)'
+                        : 'var(--semi-color-danger)',
+                    }}
+                    aria-label={tooltip}
+                    disabled={
+                      !locksReady ||
+                      Boolean(pendingLockModel) ||
+                      (!locked && isDirty)
+                    }
+                    icon={
+                      pending || locksLoading ? (
+                        <Loader2 size={16} className='animate-spin' />
+                      ) : locked ? (
+                        <Power size={16} />
+                      ) : (
+                        <PowerOff size={16} />
+                      )
+                    }
+                    onClick={() => handleLockChange(record.name, !locked)}
+                  />
+                </span>
+              </Tooltip>
+              {allowDeleteModel ? (
+                <Button
+                  size='small'
+                  type='danger'
+                  icon={<IconDelete />}
+                  disabled={!locksReady || Boolean(pendingLockModel)}
+                  onClick={() => handleDeleteModel(record.name)}
+                />
+              ) : null}
+            </Space>
+          );
+        },
       },
     ],
     [
       allowDeleteModel,
-      deleteModel,
+      handleDeleteModel,
+      handleLockChange,
+      isDirty,
+      lockedModels,
+      locksLoading,
+      locksReady,
+      pendingLockModel,
       getExprModeLabel,
       selectedModelName,
       selectedModelNames,
@@ -278,7 +418,9 @@ export default function ModelPricingEditor({
             style={isMobile ? { width: '100%' } : undefined}
           >
             {t('批量应用当前模型价格')}
-            {selectedModelNames.length > 0 ? ` (${selectedModelNames.length})` : ''}
+            {selectedModelNames.length > 0
+              ? ` (${selectedModelNames.length})`
+              : ''}
           </Button>
           <Input
             prefix={<IconSearch />}
@@ -410,7 +552,9 @@ export default function ModelPricingEditor({
                   <RadioGroup
                     type='button'
                     value={selectedModel.billingMode}
-                    onChange={(event) => handleBillingModeChange(event.target.value)}
+                    onChange={(event) =>
+                      handleBillingModeChange(event.target.value)
+                    }
                   >
                     <Radio value='per-token'>{t('按量计费')}</Radio>
                     <Radio value='per-request'>{t('按次计费')}</Radio>
@@ -446,7 +590,9 @@ export default function ModelPricingEditor({
                     value={selectedModel.fixedPrice}
                     placeholder={t('输入每次调用价格')}
                     suffix={t('$/次')}
-                    onChange={(value) => handleNumericFieldChange('fixedPrice', value)}
+                    onChange={(value) =>
+                      handleNumericFieldChange('fixedPrice', value)
+                    }
                     extraText={t('适合 MJ / 任务类等按次收费模型。')}
                   />
                 ) : selectedModel.billingMode === 'tiered_expr' ? (
@@ -471,7 +617,9 @@ export default function ModelPricingEditor({
                         label={t('输入价格')}
                         value={selectedModel.inputPrice}
                         placeholder={t('输入 $/1M tokens')}
-                        onChange={(value) => handleNumericFieldChange('inputPrice', value)}
+                        onChange={(value) =>
+                          handleNumericFieldChange('inputPrice', value)
+                        }
                       />
                       {selectedModel.completionRatioLocked ? (
                         <Banner
@@ -505,12 +653,18 @@ export default function ModelPricingEditor({
                             )}
                             disabled={selectedModel.completionRatioLocked}
                             onChange={(checked) =>
-                              handleOptionalFieldToggle('completionPrice', checked)
+                              handleOptionalFieldToggle(
+                                'completionPrice',
+                                checked,
+                              )
                             }
                           />
                         }
                         hidden={
-                          !isOptionalFieldEnabled(selectedModel, 'completionPrice')
+                          !isOptionalFieldEnabled(
+                            selectedModel,
+                            'completionPrice',
+                          )
                         }
                         disabled={
                           !hasValue(selectedModel.inputPrice) ||
@@ -521,7 +675,8 @@ export default function ModelPricingEditor({
                             ? t(
                                 '后端固定倍率：{{ratio}}。该字段仅展示换算后的价格。',
                                 {
-                                  ratio: selectedModel.lockedCompletionRatio || '-',
+                                  ratio:
+                                    selectedModel.lockedCompletionRatio || '-',
                                 },
                               )
                             : !isOptionalFieldEnabled(
@@ -536,17 +691,24 @@ export default function ModelPricingEditor({
                         label={t('缓存读取价格')}
                         value={selectedModel.cachePrice}
                         placeholder={t('输入 $/1M tokens')}
-                        onChange={(value) => handleNumericFieldChange('cachePrice', value)}
+                        onChange={(value) =>
+                          handleNumericFieldChange('cachePrice', value)
+                        }
                         headerAction={
                           <Switch
                             size='small'
-                            checked={isOptionalFieldEnabled(selectedModel, 'cachePrice')}
+                            checked={isOptionalFieldEnabled(
+                              selectedModel,
+                              'cachePrice',
+                            )}
                             onChange={(checked) =>
                               handleOptionalFieldToggle('cachePrice', checked)
                             }
                           />
                         }
-                        hidden={!isOptionalFieldEnabled(selectedModel, 'cachePrice')}
+                        hidden={
+                          !isOptionalFieldEnabled(selectedModel, 'cachePrice')
+                        }
                         disabled={!hasValue(selectedModel.inputPrice)}
                         extraText={
                           !isOptionalFieldEnabled(selectedModel, 'cachePrice')
@@ -569,12 +731,18 @@ export default function ModelPricingEditor({
                               'createCachePrice',
                             )}
                             onChange={(checked) =>
-                              handleOptionalFieldToggle('createCachePrice', checked)
+                              handleOptionalFieldToggle(
+                                'createCachePrice',
+                                checked,
+                              )
                             }
                           />
                         }
                         hidden={
-                          !isOptionalFieldEnabled(selectedModel, 'createCachePrice')
+                          !isOptionalFieldEnabled(
+                            selectedModel,
+                            'createCachePrice',
+                          )
                         }
                         disabled={!hasValue(selectedModel.inputPrice)}
                         extraText={
@@ -605,17 +773,24 @@ export default function ModelPricingEditor({
                         label={t('图片输入价格')}
                         value={selectedModel.imagePrice}
                         placeholder={t('输入 $/1M tokens')}
-                        onChange={(value) => handleNumericFieldChange('imagePrice', value)}
+                        onChange={(value) =>
+                          handleNumericFieldChange('imagePrice', value)
+                        }
                         headerAction={
                           <Switch
                             size='small'
-                            checked={isOptionalFieldEnabled(selectedModel, 'imagePrice')}
+                            checked={isOptionalFieldEnabled(
+                              selectedModel,
+                              'imagePrice',
+                            )}
                             onChange={(checked) =>
                               handleOptionalFieldToggle('imagePrice', checked)
                             }
                           />
                         }
-                        hidden={!isOptionalFieldEnabled(selectedModel, 'imagePrice')}
+                        hidden={
+                          !isOptionalFieldEnabled(selectedModel, 'imagePrice')
+                        }
                         disabled={!hasValue(selectedModel.inputPrice)}
                         extraText={
                           !isOptionalFieldEnabled(selectedModel, 'imagePrice')
@@ -638,11 +813,19 @@ export default function ModelPricingEditor({
                               'audioInputPrice',
                             )}
                             onChange={(checked) =>
-                              handleOptionalFieldToggle('audioInputPrice', checked)
+                              handleOptionalFieldToggle(
+                                'audioInputPrice',
+                                checked,
+                              )
                             }
                           />
                         }
-                        hidden={!isOptionalFieldEnabled(selectedModel, 'audioInputPrice')}
+                        hidden={
+                          !isOptionalFieldEnabled(
+                            selectedModel,
+                            'audioInputPrice',
+                          )
+                        }
                         disabled={!hasValue(selectedModel.inputPrice)}
                         extraText={
                           !isOptionalFieldEnabled(
@@ -667,17 +850,25 @@ export default function ModelPricingEditor({
                               selectedModel,
                               'audioOutputPrice',
                             )}
-                            disabled={!isOptionalFieldEnabled(
-                              selectedModel,
-                              'audioInputPrice',
-                            )}
+                            disabled={
+                              !isOptionalFieldEnabled(
+                                selectedModel,
+                                'audioInputPrice',
+                              )
+                            }
                             onChange={(checked) =>
-                              handleOptionalFieldToggle('audioOutputPrice', checked)
+                              handleOptionalFieldToggle(
+                                'audioOutputPrice',
+                                checked,
+                              )
                             }
                           />
                         }
                         hidden={
-                          !isOptionalFieldEnabled(selectedModel, 'audioOutputPrice')
+                          !isOptionalFieldEnabled(
+                            selectedModel,
+                            'audioOutputPrice',
+                          )
                         }
                         disabled={!hasValue(selectedModel.audioInputPrice)}
                         extraText={

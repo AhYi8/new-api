@@ -445,5 +445,42 @@ export type UpstreamRatiosResponse = {
   data: {
     differences: DifferencesMap
     test_results: TestResult[]
+    ignored_locked_models: string[]
+  }
+}
+
+export type ModelPricingLocksResponse = {
+  success: boolean
+  message: string
+  data: {
+    locked_models: string[]
+  }
+}
+
+export type UpdateModelPricingLockRequest = {
+  model_name: string
+  locked: boolean
+}
+
+export type UpdateModelPricingLockResponse = {
+  success: boolean
+  message: string
+  data: {
+    model_name: string
+    locked: boolean
+    locked_models: string[]
+  }
+}
+
+export type ApplyModelPricingSyncRequest = {
+  resolutions: Record<string, Partial<Record<RatioType, number | string>>>
+}
+
+export type ApplyModelPricingSyncResponse = {
+  success: boolean
+  message: string
+  data: {
+    applied_models: string[]
+    ignored_locked_models: string[]
   }
 }
