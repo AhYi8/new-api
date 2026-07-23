@@ -32,6 +32,11 @@ func InitOptionMap() {
 	common.OptionMap = make(map[string]string)
 
 	// 添加原有的系统配置
+	common.OptionMap[ModelAliasGroupsOptionKey] = "[]"
+	common.OptionMap[ModelAliasScanEnabledOptionKey] = "true"
+	common.OptionMap[ModelAliasScanIntervalOptionKey] = strconv.Itoa(DefaultModelAliasScanIntervalMinutes)
+	common.OptionMap[ModelAliasPendingCountsOptionKey] = "{}"
+	common.OptionMap[modelAliasScanRevisionOptionKey] = ""
 	common.OptionMap["FileUploadPermission"] = strconv.Itoa(common.FileUploadPermission)
 	common.OptionMap["FileDownloadPermission"] = strconv.Itoa(common.FileDownloadPermission)
 	common.OptionMap["ImageUploadPermission"] = strconv.Itoa(common.ImageUploadPermission)
@@ -187,6 +192,10 @@ func InitOptionMap() {
 }
 
 func loadOptionsFromDatabase() {
+	// 与模型别名事务使用相同的锁顺序，避免旧数据库快照在新配置提交后覆盖本地缓存。
+	modelAliasOptionsMu.Lock()
+	defer modelAliasOptionsMu.Unlock()
+
 	options, _ := AllOption()
 	for _, option := range options {
 		err := updateOptionMap(option.Key, option.Value)

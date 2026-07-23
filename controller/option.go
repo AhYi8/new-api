@@ -80,7 +80,7 @@ func GetOptions(c *gin.Context) {
 	optionValues := make(map[string]string)
 	common.OptionMapRWMutex.Lock()
 	for k, v := range common.OptionMap {
-		if k == model.ModelPricingLocksOptionKey {
+		if k == model.ModelPricingLocksOptionKey || strings.HasPrefix(k, "ModelAlias") {
 			continue
 		}
 		value := common.Interface2String(v)
@@ -140,10 +140,11 @@ func UpdateOption(c *gin.Context) {
 	default:
 		option.Value = fmt.Sprintf("%v", option.Value)
 	}
-	switch option.Key {
-	case model.ModelPricingLocksOptionKey:
-		common.ApiErrorMsg(c, "模型价格锁不允许通过通用设置接口修改")
+	if option.Key == model.ModelPricingLocksOptionKey || strings.HasPrefix(option.Key, "ModelAlias") {
+		common.ApiErrorMsg(c, "该配置不允许通过通用设置接口修改")
 		return
+	}
+	switch option.Key {
 	case "QuotaForInviter", "QuotaForInvitee":
 		if isPositiveOptionValue(option.Value.(string)) && !operation_setting.IsPaymentComplianceConfirmed() {
 			common.ApiErrorI18n(c, i18n.MsgPaymentComplianceRequired)

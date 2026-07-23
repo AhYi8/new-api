@@ -1,3 +1,5 @@
+import i18next from 'i18next'
+
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -17,7 +19,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from '@/lib/api'
-import i18next from 'i18next'
 
 import type {
   ApplyModelPricingSyncRequest,
@@ -25,6 +26,10 @@ import type {
   ConfirmPaymentComplianceResponse,
   FetchUpstreamRatiosRequest,
   LogCleanupTask,
+  ModelAliasApplyResponse,
+  ModelAliasGroup,
+  ModelAliasGroupsResponse,
+  ModelAliasPreviewResponse,
   ModelPricingLocksResponse,
   SystemOptionsResponse,
   SystemTaskListResponse,
@@ -45,6 +50,62 @@ export async function getSystemOptions() {
 export async function updateSystemOption(request: UpdateOptionRequest) {
   const res = await api.put<UpdateOptionResponse>('/api/option/', request)
   return res.data
+}
+
+function assertSuccessfulResponse<
+  T extends { success: boolean; message: string },
+>(response: T, fallbackMessage: string) {
+  if (!response.success) {
+    throw new Error(response.message || fallbackMessage)
+  }
+  return response
+}
+
+export async function getModelAliasGroups() {
+  const res = await api.get<ModelAliasGroupsResponse>(
+    '/api/option/model-alias-groups'
+  )
+  return assertSuccessfulResponse(
+    res.data,
+    i18next.t('Failed to load model alias groups')
+  )
+}
+
+export async function updateModelAliasGroups(configuration: {
+  groups: ModelAliasGroup[]
+  scan_enabled: boolean
+  scan_interval_minutes: number
+}) {
+  const res = await api.put<ModelAliasGroupsResponse>(
+    '/api/option/model-alias-groups',
+    configuration
+  )
+  return assertSuccessfulResponse(
+    res.data,
+    i18next.t('Failed to save model alias groups')
+  )
+}
+
+export async function previewModelAliasGroup(alias: string) {
+  const res = await api.post<ModelAliasPreviewResponse>(
+    '/api/option/model-alias-groups/preview',
+    { alias }
+  )
+  return assertSuccessfulResponse(
+    res.data,
+    i18next.t('Failed to preview model alias group')
+  )
+}
+
+export async function applyModelAliasGroup(alias: string) {
+  const res = await api.post<ModelAliasApplyResponse>(
+    '/api/option/model-alias-groups/apply',
+    { alias }
+  )
+  return assertSuccessfulResponse(
+    res.data,
+    i18next.t('Failed to apply model alias group')
+  )
 }
 
 export async function confirmPaymentCompliance() {

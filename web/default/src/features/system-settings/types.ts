@@ -247,6 +247,73 @@ export type ModelSettings = {
   'model_deployment.ionet.enabled': boolean
 }
 
+export type ModelAliasGroup = {
+  alias: string
+  models: string[]
+  pending_count?: number
+}
+
+export type ModelAliasConfiguration = {
+  groups: ModelAliasGroup[]
+  scan_enabled: boolean
+  scan_interval_minutes: number
+}
+
+export type ModelAliasPreviewStatus =
+  | 'new'
+  | 'unchanged'
+  | 'updated'
+  | 'conflict'
+  | 'multiple_matches'
+  | 'unmatched'
+
+export type ModelAliasChannelPreview = {
+  channel_id: number
+  channel_name: string
+  channel_status: number
+  status: ModelAliasPreviewStatus
+  reason?: string
+  matched_models: string[]
+  current_target?: string
+  proposed_target?: string
+}
+
+export type ModelAliasPreview = {
+  alias: string
+  counts: Partial<Record<ModelAliasPreviewStatus, number>>
+  items: ModelAliasChannelPreview[]
+}
+
+export type ModelAliasApplyFailure = {
+  channel_id: number
+  channel_name: string
+  error: string
+}
+
+export type ModelAliasApplyResult = {
+  applied: number
+  skipped: number
+  failed: ModelAliasApplyFailure[]
+}
+
+export type ModelAliasGroupsResponse = {
+  success: boolean
+  message: string
+  data: ModelAliasConfiguration
+}
+
+export type ModelAliasPreviewResponse = {
+  success: boolean
+  message: string
+  data: ModelAliasPreview
+}
+
+export type ModelAliasApplyResponse = {
+  success: boolean
+  message: string
+  data: ModelAliasApplyResult
+}
+
 export type BillingSettings = {
   QuotaForNewUser: number
   PreConsumedQuota: number

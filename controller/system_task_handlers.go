@@ -20,6 +20,7 @@ import (
 func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(channelTestHandler{})
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
+	service.RegisterSystemTaskHandler(modelAliasScanHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
 }
@@ -109,6 +110,46 @@ func (modelUpdateHandler) Run(ctx context.Context, task *model.SystemTask, runne
 	}
 	summary := runChannelUpstreamModelUpdateTaskOnce(ctx, payload.Manual, !payload.Manual, service.NewSystemTaskProgressReporter(task, runnerID))
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+// modelAliasScanHandler 只读取渠道配置并更新别名组待处理数量，不修改渠道或路由状态。
+type modelAliasScanHandler struct{}
+
+func (modelAliasScanHandler) Type() string { return model.SystemTaskTypeModelAliasScan }
+
+func (modelAliasScanHandler) Enabled() bool {
+	if !model.IsModelAliasScanEnabled() {
+		return false
+	}
+	groups, err := model.GetModelAliasGroups()
+	if err != nil {
+		common.SysLog("读取模型别名组失败，跳过定时扫描: " + err.Error())
+		return false
+	}
+	return len(groups) > 0
+}
+
+func (modelAliasScanHandler) Interval() time.Duration {
+	return time.Duration(model.GetModelAliasScanIntervalMinutes()) * time.Minute
+}
+
+func (modelAliasScanHandler) NewPayload() any { return nil }
+
+func (modelAliasScanHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary, err := model.ScanModelAliasPendingCounts(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+		return
+	}
+	finishModelAliasScanTask(task, runnerID, summary)
+}
+
+func finishModelAliasScanTask(task *model.SystemTask, runnerID string, summary model.ModelAliasScanSummary) {
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+	// 保存或应用可能在扫描完成和任务落库之间发生；先结束活动任务，再补排新版本扫描。
+	if !summary.IsCurrent() {
+		requestModelAliasScan()
+	}
 }
 
 // midjourneyPollHandler runs one Midjourney polling pass per scheduled run.

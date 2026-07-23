@@ -191,11 +191,12 @@ Do NOT directly import or call `encoding/json` in business code. `json.RawMessag
 - Prefer GORM methods (`Create`, `Find`, `Where`, `Updates`, etc.) over raw SQL.
 - Let GORM handle primary key generation; do not use `AUTO_INCREMENT` or `SERIAL` directly.
 - Standard `SELECT ... FOR UPDATE` row locks built with GORM query methods in `model/` MUST use `lockForUpdate(tx)`. Do not use the legacy GORM v1 pattern `tx.Set("gorm:query_option", "FOR UPDATE")`, because GORM v2 silently ignores it and no lock is acquired. Do not duplicate `clause.Locking{Strength: "UPDATE"}` at call sites; the shared helper emits `FOR UPDATE` for MySQL/PostgreSQL and skips it for SQLite, where the syntax is unsupported. Dialect-specific locking with different semantics (for example, a MySQL next-key/gap lock) may use raw SQL only behind explicit database-type branches with valid fallbacks for every supported database.
-- When raw SQL is unavoidable, account for dialect differences:
-  - PostgreSQL uses `"column"` quoting, while MySQL/SQLite use `` `column` ``.
-  - Use `commonGroupCol`, `commonKeyCol` from `model/main.go` for reserved-word columns like `group` and `key`.
-  - Use `commonTrueVal`/`commonFalseVal` for boolean values.
-  - Use `common.UsingMainDatabase(...)` for primary database branches and `common.UsingLogDatabase(...)` for log database branches.
+- 原始 SQL 不可避免时，必须处理数据库方言差异：
+  - PostgreSQL 使用 `"column"` 引用列名，MySQL/SQLite 使用 `` `column` ``。
+  - 传给 GORM 查询方法（`Where`、`Select`、`Order`、`Joins`、锁查询及类似 API）的字符串片段都属于原始 SQL；GORM 不会自动转义片段中的标识符。优先使用结构化 GORM API，否则使用 `model/main.go` 中按方言定义的 `common*Col` 列常量。
+  - 布尔值使用 `commonTrueVal`/`commonFalseVal`。
+  - 每新增一段原始 SQL，都必须检查所有支持方言生成的 SQL，并在适用时补充标识符、引用和锁行为的回归测试。
+  - 主数据库和日志数据库分支分别使用 `common.UsingMainDatabase(...)` 与 `common.UsingLogDatabase(...)`。
 - Do not use database-specific features without cross-DB fallback, including MySQL-only functions, PostgreSQL-only operators, SQLite-unsupported `ALTER COLUMN`, or database-specific JSON column types without a `TEXT` fallback.
 - Migrations must work on all three databases. For SQLite, use `ALTER TABLE ... ADD COLUMN` instead of `ALTER COLUMN` (see `model/main.go` for patterns).
 - Avoid GORM boolean default tags such as `gorm:"default:true"` when the default is a business rule already enforced by code. MySQL and PostgreSQL can normalize boolean defaults differently, causing GORM `AutoMigrate` to repeatedly issue `ALTER TABLE` on restart. Prefer setting these defaults in request/model normalization, hooks, constructors, or service logic; do not replace `default:true` with `default:1` unless the behavior is verified across SQLite, MySQL, and PostgreSQL.

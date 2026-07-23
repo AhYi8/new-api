@@ -188,6 +188,10 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			optionRoute.GET("/", controller.GetOptions)
 			optionRoute.PUT("/", controller.UpdateOption)
+			optionRoute.GET("/model-alias-groups", controller.GetModelAliasGroups)
+			optionRoute.PUT("/model-alias-groups", controller.UpdateModelAliasGroups)
+			optionRoute.POST("/model-alias-groups/preview", controller.PreviewModelAliasGroup)
+			optionRoute.POST("/model-alias-groups/apply", controller.ApplyModelAliasGroup)
 			optionRoute.POST("/payment_compliance", controller.ConfirmPaymentCompliance)
 			optionRoute.GET("/channel_affinity_cache", controller.GetChannelAffinityCacheStats)
 			optionRoute.DELETE("/channel_affinity_cache", controller.ClearChannelAffinityCache)
