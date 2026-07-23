@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -92,6 +93,34 @@ func TestNormalizeModelAliasGroupsValidatesAndDeduplicates(t *testing.T) {
 			assert.Error(t, err)
 		})
 	}
+}
+
+func TestFilterModelAliasCatalogMatchesNamesAndExcludesExactAlias(t *testing.T) {
+	pricing := []Pricing{
+		{ModelName: "deepseek-v4-pro"},
+		{ModelName: "nvidia/DeepSeek-V4-Pro"},
+		{ModelName: "deepseek-ai/deepseek-v4-pro"},
+		{ModelName: "deepseek-ai/deepseek-v4-pro"},
+		{ModelName: "unrelated-model", Description: "deepseek-v4-pro"},
+		{ModelName: "  "},
+	}
+
+	matched := filterModelAliasCatalog(pricing, "deepseek-v4-pro")
+
+	assert.Equal(t, []string{
+		"deepseek-ai/deepseek-v4-pro",
+		"nvidia/DeepSeek-V4-Pro",
+	}, matched)
+}
+
+func TestSearchModelAliasCatalogValidatesKeyword(t *testing.T) {
+	_, err := SearchModelAliasCatalog("  ")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "统一名称不能为空")
+
+	_, err = SearchModelAliasCatalog(strings.Repeat("a", maxModelAliasNameLength+1))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "不能超过")
 }
 
 func TestParseModelAliasChannelMappingRejectsNull(t *testing.T) {

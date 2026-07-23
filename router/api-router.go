@@ -189,6 +189,7 @@ func SetApiRouter(router *gin.Engine) {
 			optionRoute.GET("/", controller.GetOptions)
 			optionRoute.PUT("/", controller.UpdateOption)
 			optionRoute.GET("/model-alias-groups", controller.GetModelAliasGroups)
+			optionRoute.GET("/model-alias-groups/catalog", controller.SearchModelAliasCatalog)
 			optionRoute.PUT("/model-alias-groups", controller.UpdateModelAliasGroups)
 			optionRoute.POST("/model-alias-groups/preview", controller.PreviewModelAliasGroup)
 			optionRoute.POST("/model-alias-groups/apply", controller.ApplyModelAliasGroup)

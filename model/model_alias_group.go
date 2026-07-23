@@ -158,6 +158,45 @@ func validateModelAliasName(name string, field string) error {
 	return nil
 }
 
+// SearchModelAliasCatalog 从完整模型广场目录中查找可作为供应商名称的模型。
+// 统一名称本身不能成为映射目标，因此按配置的精确匹配规则排除同名项。
+func SearchModelAliasCatalog(keyword string) ([]string, error) {
+	keyword = strings.TrimSpace(keyword)
+	if err := validateModelAliasName(keyword, "统一名称"); err != nil {
+		return nil, err
+	}
+	return filterModelAliasCatalog(GetPricing(), keyword), nil
+}
+
+func filterModelAliasCatalog(pricing []Pricing, keyword string) []string {
+	lowerKeyword := strings.ToLower(keyword)
+	matchedSet := make(map[string]struct{})
+	for _, item := range pricing {
+		modelName := strings.TrimSpace(item.ModelName)
+		if modelName == "" || modelName == keyword {
+			continue
+		}
+		if !strings.Contains(strings.ToLower(modelName), lowerKeyword) {
+			continue
+		}
+		matchedSet[modelName] = struct{}{}
+	}
+
+	matched := make([]string, 0, len(matchedSet))
+	for modelName := range matchedSet {
+		matched = append(matched, modelName)
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		left := strings.ToLower(matched[i])
+		right := strings.ToLower(matched[j])
+		if left == right {
+			return matched[i] < matched[j]
+		}
+		return left < right
+	})
+	return matched
+}
+
 func GetModelAliasGroups() ([]ModelAliasGroup, error) {
 	common.OptionMapRWMutex.RLock()
 	raw := common.Interface2String(common.OptionMap[ModelAliasGroupsOptionKey])

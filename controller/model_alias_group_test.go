@@ -87,6 +87,64 @@ func TestModelAliasGroupEndpointRequiresRootUser(t *testing.T) {
 	assert.Equal(t, 401, recorder.Code)
 }
 
+func TestSearchModelAliasCatalogReturnsModelNames(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.Create(&model.Channel{
+		Id:     1,
+		Type:   1,
+		Key:    "test-key",
+		Status: common.ChannelStatusEnabled,
+		Name:   "catalog-channel",
+		Models: "provider/deepseek-v4-pro,unrelated-model",
+		Group:  "default",
+	}).Error)
+	require.NoError(t, db.Create(&[]model.Ability{
+		{Group: "default", Model: "provider/deepseek-v4-pro", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "unrelated-model", ChannelId: 1, Enabled: true},
+	}).Error)
+	model.InvalidatePricingCache()
+	t.Cleanup(model.InvalidatePricingCache)
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(
+		"GET",
+		"/api/option/model-alias-groups/catalog?model_name=DEEPSEEK-V4",
+		nil,
+	)
+
+	SearchModelAliasCatalog(context)
+
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+		Data    struct {
+			Models []string `json:"models"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	assert.Empty(t, response.Message)
+	assert.Equal(t, []string{"provider/deepseek-v4-pro"}, response.Data.Models)
+}
+
+func TestSearchModelAliasCatalogRejectsEmptyKeyword(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest("GET", "/api/option/model-alias-groups/catalog", nil)
+
+	SearchModelAliasCatalog(context)
+
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.False(t, response.Success)
+	assert.Contains(t, response.Message, "统一名称不能为空")
+}
+
 func TestPreviewModelAliasGroupRejectsEmptyAlias(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

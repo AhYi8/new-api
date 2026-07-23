@@ -302,6 +302,14 @@ export type ModelAliasGroupsResponse = {
   data: ModelAliasConfiguration
 }
 
+export type ModelAliasCatalogResponse = {
+  success: boolean
+  message: string
+  data: {
+    models: string[]
+  }
+}
+
 export type ModelAliasPreviewResponse = {
   success: boolean
   message: string

@@ -16,7 +16,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Add01Icon } from '@hugeicons/core-free-icons'
+import { Add01Icon, Alert02Icon } from '@hugeicons/core-free-icons'
 import { HugeiconsIcon } from '@hugeicons/react'
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
@@ -37,6 +37,8 @@ import {
 } from '@/components/ui/combobox'
 import { copyToClipboard } from '@/lib/copy-to-clipboard'
 import { cn } from '@/lib/utils'
+
+import { parseMultiSelectPaste } from './multi-select-values'
 
 export type Option = {
   label: string
@@ -60,6 +62,14 @@ interface MultiSelectProps {
   emptyText?: string
   /** Optional `id` to wire labels/aria-describedby to the input. */
   id?: string
+  /** 由组合框输入关联并供读屏软件播报的说明元素 ID。 */
+  ariaDescribedBy?: string
+  /** 需要显示非阻断警告样式的已选值。 */
+  warningValues?: ReadonlySet<string>
+  /** 高亮值对应的无障碍警告文案。 */
+  warningText?: string
+  /** 组合框当前是否处于表单校验失败状态。 */
+  ariaInvalid?: boolean
   /** Disable the entire control. */
   disabled?: boolean
   /** 锁定已选值，但保留下拉查看与搜索能力。 */
@@ -214,6 +224,21 @@ export function MultiSelect(props: MultiSelectProps) {
     }
   }
 
+  const handlePaste = (event: React.ClipboardEvent<HTMLInputElement>) => {
+    if (!props.allowCreate || readOnly) return
+    const pastedText = event.clipboardData.getData('text')
+    const selectionStart =
+      event.currentTarget.selectionStart ?? inputValue.length
+    const selectionEnd = event.currentTarget.selectionEnd ?? inputValue.length
+    const nextInput = `${inputValue.slice(0, selectionStart)}${pastedText}${inputValue.slice(selectionEnd)}`
+    const pastedValues = parseMultiSelectPaste(nextInput)
+    if (pastedValues === null) return
+
+    event.preventDefault()
+    addValues(pastedValues)
+    setInputValue('')
+  }
+
   const handleCopyChip = React.useCallback(
     async (
       event: React.MouseEvent<HTMLButtonElement>,
@@ -289,8 +314,30 @@ export function MultiSelect(props: MultiSelectProps) {
               <>
                 {visibleValues.map((value) => {
                   const label = labelMap.get(value) ?? value
+                  const hasWarning = props.warningValues?.has(value) === true
                   return (
-                    <ComboboxChip key={value} showRemove={!readOnly}>
+                    <ComboboxChip
+                      key={value}
+                      showRemove={!readOnly}
+                      className={
+                        hasWarning
+                          ? 'border border-amber-500/70 bg-amber-50 text-amber-950 dark:bg-amber-500/15 dark:text-amber-100'
+                          : undefined
+                      }
+                    >
+                      {hasWarning && (
+                        <>
+                          <HugeiconsIcon
+                            icon={Alert02Icon}
+                            strokeWidth={2}
+                            className='size-3.5 shrink-0 text-amber-600 dark:text-amber-400'
+                            aria-hidden='true'
+                          />
+                          {props.warningText && (
+                            <span className='sr-only'>{props.warningText}</span>
+                          )}
+                        </>
+                      )}
                       {props.copyChipOnClick ? (
                         <button
                           type='button'
@@ -351,12 +398,15 @@ export function MultiSelect(props: MultiSelectProps) {
         </ComboboxValue>
         <ComboboxChipsInput
           id={props.id}
+          aria-describedby={props.ariaDescribedBy}
+          aria-invalid={props.ariaInvalid || undefined}
           placeholder={
             props.selected.length === 0 && !props.renderSelectedSummary
               ? placeholder
               : undefined
           }
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           aria-label={placeholder}
         />
       </ComboboxChips>
@@ -366,12 +416,17 @@ export function MultiSelect(props: MultiSelectProps) {
           <ComboboxCollection>
             {(item: string) => {
               const isCreate = canCreate && item === trimmedInput
+              const hasWarning = props.warningValues?.has(item) === true
               const label = labelMap.get(item) ?? item
               return (
                 <ComboboxItem
                   key={item}
                   value={item}
-                  className={isCreate ? 'text-foreground' : undefined}
+                  className={cn(
+                    isCreate && 'text-foreground',
+                    hasWarning &&
+                      'text-amber-800 dark:text-amber-300 [&_[data-slot=combobox-item-indicator]]:text-amber-600'
+                  )}
                 >
                   {isCreate ? (
                     <>
@@ -388,7 +443,20 @@ export function MultiSelect(props: MultiSelectProps) {
                       </span>
                     </>
                   ) : (
-                    <span className='truncate'>{label}</span>
+                    <>
+                      {hasWarning && (
+                        <HugeiconsIcon
+                          icon={Alert02Icon}
+                          strokeWidth={2}
+                          className='size-4 shrink-0'
+                          aria-hidden='true'
+                        />
+                      )}
+                      <span className='truncate'>{label}</span>
+                      {hasWarning && props.warningText && (
+                        <span className='sr-only'>{props.warningText}</span>
+                      )}
+                    </>
                   )}
                 </ComboboxItem>
               )

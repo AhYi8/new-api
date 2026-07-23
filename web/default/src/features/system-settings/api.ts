@@ -27,6 +27,7 @@ import type {
   FetchUpstreamRatiosRequest,
   LogCleanupTask,
   ModelAliasApplyResponse,
+  ModelAliasCatalogResponse,
   ModelAliasGroup,
   ModelAliasGroupsResponse,
   ModelAliasPreviewResponse,
@@ -68,6 +69,17 @@ export async function getModelAliasGroups() {
   return assertSuccessfulResponse(
     res.data,
     i18next.t('Failed to load model alias groups')
+  )
+}
+
+export async function searchModelAliasCatalog(keyword: string) {
+  const res = await api.get<ModelAliasCatalogResponse>(
+    '/api/option/model-alias-groups/catalog',
+    { params: { model_name: keyword } }
+  )
+  return assertSuccessfulResponse(
+    res.data,
+    i18next.t('Failed to search model catalog')
   )
 }
 

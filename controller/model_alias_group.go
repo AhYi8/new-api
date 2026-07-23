@@ -29,6 +29,15 @@ func GetModelAliasGroups(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": configuration})
 }
 
+func SearchModelAliasCatalog(c *gin.Context) {
+	models, err := model.SearchModelAliasCatalog(c.Query("model_name"))
+	if err != nil {
+		common.ApiErrorMsg(c, err.Error())
+		return
+	}
+	common.ApiSuccess(c, gin.H{"models": models})
+}
+
 func UpdateModelAliasGroups(c *gin.Context) {
 	var request updateModelAliasGroupsRequest
 	if err := common.DecodeJson(c.Request.Body, &request); err != nil {
