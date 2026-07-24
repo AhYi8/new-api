@@ -26,6 +26,7 @@ import type {
   ConfirmPaymentComplianceResponse,
   FetchUpstreamRatiosRequest,
   LogCleanupTask,
+  ModelAliasApplyRequest,
   ModelAliasApplyResponse,
   ModelAliasCatalogResponse,
   ModelAliasGroup,
@@ -109,10 +110,13 @@ export async function previewModelAliasGroup(alias: string) {
   )
 }
 
-export async function applyModelAliasGroup(alias: string) {
+export async function applyModelAliasGroup(
+  request: string | ModelAliasApplyRequest
+) {
+  const payload = typeof request === 'string' ? { alias: request } : request
   const res = await api.post<ModelAliasApplyResponse>(
     '/api/option/model-alias-groups/apply',
-    { alias }
+    payload
   )
   return assertSuccessfulResponse(
     res.data,

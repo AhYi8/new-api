@@ -42,6 +42,7 @@ import {
   updateModelAliasGroups,
 } from '../api'
 import type {
+  ModelAliasApplyRequest,
   ModelAliasGroup,
   ModelAliasPreview as ModelAliasPreviewData,
 } from '../types'
@@ -66,6 +67,12 @@ export function ModelAliasGroupsSection() {
   const [editingGroup, setEditingGroup] = useState<ModelAliasGroup | null>(null)
   const [preview, setPreview] = useState<ModelAliasPreviewData | null>(null)
   const [applyAlias, setApplyAlias] = useState<string | null>(null)
+  const [selectedPreviewChannelIds, setSelectedPreviewChannelIds] = useState<
+    number[]
+  >([])
+  const [selectedTargetModels, setSelectedTargetModels] = useState<
+    Record<number, string>
+  >({})
   const [deleteAlias, setDeleteAlias] = useState<string | null>(null)
   const saveInFlightRef = useRef(false)
 
@@ -120,13 +127,17 @@ export function ModelAliasGroupsSection() {
 
   const previewMutation = useMutation({
     mutationFn: previewModelAliasGroup,
-    onSuccess: (response) => setPreview(response.data),
+    onSuccess: (response) => {
+      setPreview(response.data)
+      setSelectedPreviewChannelIds([])
+      setSelectedTargetModels({})
+    },
     onError: (error: Error) => toast.error(error.message),
   })
 
   const applyMutation = useMutation({
     mutationFn: applyModelAliasGroup,
-    onSuccess: (response) => {
+    onSuccess: (response, request) => {
       setApplyAlias(null)
       toast.success(
         t('Applied model alias group to {{count}} channels', {
@@ -140,7 +151,9 @@ export function ModelAliasGroupsSection() {
           })
         )
       }
-      if (preview?.alias) previewMutation.mutate(preview.alias)
+      previewMutation.mutate(
+        typeof request === 'string' ? request : request.alias
+      )
       queryClient.invalidateQueries({ queryKey: MODEL_ALIAS_QUERY_KEY })
     },
     onError: (error: Error) => toast.error(error.message),
@@ -179,6 +192,52 @@ export function ModelAliasGroupsSection() {
 
   const handlePreview = (alias: string) => {
     previewMutation.mutate(alias)
+  }
+
+  const handleTargetModelChange = (channelId: number, target: string) => {
+    const currentTarget =
+      preview?.items.find((item) => item.channel_id === channelId)
+        ?.current_target ?? ''
+    if (target.trim() === '' || target === currentTarget) {
+      setSelectedTargetModels((current) => {
+        const next = { ...current }
+        delete next[channelId]
+        return next
+      })
+      setSelectedPreviewChannelIds((current) =>
+        current.filter((id) => id !== channelId)
+      )
+      return
+    }
+    setSelectedTargetModels((current) => ({ ...current, [channelId]: target }))
+    setSelectedPreviewChannelIds((current) =>
+      current.includes(channelId) ? current : [...current, channelId]
+    )
+  }
+
+  const buildApplyRequest = (alias: string): ModelAliasApplyRequest => {
+    const targetModels: Record<number, string> = {}
+    const selectedChannelIdSet = new Set(selectedPreviewChannelIds)
+    for (const [channelId, target] of Object.entries(selectedTargetModels)) {
+      const normalizedTarget = target.trim()
+      const numericChannelId = Number(channelId)
+      if (
+        normalizedTarget === '' ||
+        !selectedChannelIdSet.has(numericChannelId)
+      ) {
+        continue
+      }
+      targetModels[numericChannelId] = normalizedTarget
+    }
+    return {
+      alias,
+      selected_channel_ids:
+        selectedPreviewChannelIds.length > 0
+          ? selectedPreviewChannelIds
+          : undefined,
+      target_models:
+        Object.keys(targetModels).length > 0 ? targetModels : undefined,
+    }
   }
 
   const handleScanEnabledChange = async (checked: boolean) => {
@@ -222,6 +281,11 @@ export function ModelAliasGroupsSection() {
       if (preview?.alias === alias) setPreview(null)
     }
   }
+
+  const hasDefaultApplyChanges =
+    preview !== null &&
+    (preview.counts.new ?? 0) + (preview.counts.updated ?? 0) > 0
+  const hasSelectedApplyChanges = selectedPreviewChannelIds.length > 0
 
   const columns = [
     {
@@ -456,15 +520,22 @@ export function ModelAliasGroupsSection() {
               <Button
                 onClick={() => setApplyAlias(preview.alias)}
                 disabled={
-                  (preview.counts.new ?? 0) + (preview.counts.updated ?? 0) ===
-                    0 || applyMutation.isPending
+                  (!hasDefaultApplyChanges && !hasSelectedApplyChanges) ||
+                  applyMutation.isPending
                 }
               >
                 <WandSparkles data-icon='inline-start' />
                 {t('Apply eligible changes')}
               </Button>
             </div>
-            <ModelAliasPreview key={preview.alias} preview={preview} />
+            <ModelAliasPreview
+              key={preview.alias}
+              preview={preview}
+              selectedChannelIds={selectedPreviewChannelIds}
+              targetModels={selectedTargetModels}
+              onSelectedChannelIdsChange={setSelectedPreviewChannelIds}
+              onTargetModelChange={handleTargetModelChange}
+            />
           </div>
         </>
       ) : null}
@@ -483,11 +554,13 @@ export function ModelAliasGroupsSection() {
         }}
         title={t('Apply model alias group?')}
         desc={t(
-          'Only channels classified as new or update will be changed. Conflicts and unmatched channels remain untouched.'
+          'Only selected channels will be changed. With no selection, all eligible changes will be applied. Conflicts and unmatched channels remain untouched.'
         )}
         confirmText={t('Apply changes')}
         isLoading={applyMutation.isPending}
-        handleConfirm={() => applyAlias && applyMutation.mutate(applyAlias)}
+        handleConfirm={() =>
+          applyAlias && applyMutation.mutate(buildApplyRequest(applyAlias))
+        }
       />
       <ConfirmDialog
         open={deleteAlias !== null}

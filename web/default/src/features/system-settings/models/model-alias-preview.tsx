@@ -12,6 +12,15 @@ import { useTranslation } from 'react-i18next'
 import { StaticDataTable } from '@/components/data-table'
 import { StatusBadge } from '@/components/status-badge'
 import { Badge } from '@/components/ui/badge'
+import { Checkbox } from '@/components/ui/checkbox'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 
 import type {
@@ -22,6 +31,10 @@ import type {
 
 type ModelAliasPreviewProps = {
   preview: ModelAliasPreviewData
+  selectedChannelIds: number[]
+  targetModels: Record<number, string>
+  onSelectedChannelIdsChange: (channelIds: number[]) => void
+  onTargetModelChange: (channelId: number, target: string) => void
 }
 
 const statusVariant: Record<
@@ -45,7 +58,13 @@ const previewStatuses: ModelAliasPreviewStatus[] = [
   'unmatched',
 ]
 
-export function ModelAliasPreview({ preview }: ModelAliasPreviewProps) {
+export function ModelAliasPreview({
+  preview,
+  selectedChannelIds,
+  targetModels,
+  onSelectedChannelIdsChange,
+  onTargetModelChange,
+}: ModelAliasPreviewProps) {
   const { t } = useTranslation()
   const [selectedStatus, setSelectedStatus] =
     useState<ModelAliasPreviewStatus | null>(null)
@@ -98,8 +117,146 @@ export function ModelAliasPreview({ preview }: ModelAliasPreviewProps) {
     }
     return disabledChannelStatus
   }
+  const selectedChannelIdSet = useMemo(
+    () => new Set(selectedChannelIds),
+    [selectedChannelIds]
+  )
+  const selectableChannelIds = useMemo(
+    () =>
+      preview.items
+        .filter((item) => {
+          if (item.status === 'new' || item.status === 'updated') return true
+          const selectedTarget = targetModels[item.channel_id]
+          return (
+            item.status === 'multiple_matches' &&
+            item.matched_models.length > 1 &&
+            Boolean(selectedTarget) &&
+            selectedTarget !== item.current_target
+          )
+        })
+        .map((item) => item.channel_id),
+    [preview.items, targetModels]
+  )
+  const selectedCount = selectedChannelIds.length
+  const allSelected =
+    selectableChannelIds.length > 0 &&
+    selectedCount > 0 &&
+    selectedCount === selectableChannelIds.length
+  const someSelected =
+    selectedCount > 0 && selectedCount < selectableChannelIds.length
+  const toggleAllChannels = (checked: boolean) => {
+    onSelectedChannelIdsChange(checked ? selectableChannelIds : [])
+  }
+  const toggleChannel = (channelId: number, checked: boolean) => {
+    onSelectedChannelIdsChange(
+      checked
+        ? [...selectedChannelIds, channelId]
+        : selectedChannelIds.filter((id) => id !== channelId)
+    )
+  }
+  const renderMapping = (item: ModelAliasChannelPreview) => {
+    const hasValidCurrentTarget =
+      Boolean(item.current_target) &&
+      item.matched_models.includes(item.current_target ?? '')
+    if (item.matched_models.length > 1 && item.status === 'multiple_matches') {
+      const selectedTarget =
+        targetModels[item.channel_id] ||
+        (hasValidCurrentTarget ? item.current_target : '') ||
+        ''
+      return (
+        <div className='flex flex-nowrap items-center gap-2 whitespace-nowrap'>
+          <span className='text-muted-foreground shrink-0'>
+            {t('Target')}:{' '}
+          </span>
+          <Select
+            value={selectedTarget || null}
+            onValueChange={(value) =>
+              onTargetModelChange(item.channel_id, value ?? '')
+            }
+          >
+            <SelectTrigger className='w-72 shrink-0' size='sm'>
+              <SelectValue placeholder={t('Select target model')} />
+            </SelectTrigger>
+            <SelectContent alignItemWithTrigger={false}>
+              <SelectGroup>
+                {item.matched_models.map((modelName) => (
+                  <SelectItem key={modelName} value={modelName}>
+                    {modelName}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </div>
+      )
+    }
+
+    if (item.current_target && item.proposed_target) {
+      return (
+        <div className='space-y-1'>
+          <div>
+            <span className='text-muted-foreground'>{t('Current')}: </span>
+            <code>{item.current_target}</code>
+          </div>
+          <div>
+            <span className='text-muted-foreground'>{t('Target')}: </span>
+            <code>{item.proposed_target}</code>
+          </div>
+        </div>
+      )
+    }
+    if (item.current_target) {
+      return (
+        <div>
+          <span className='text-muted-foreground'>{t('Current')}: </span>
+          <code>{item.current_target}</code>
+        </div>
+      )
+    }
+    if (item.proposed_target) {
+      return (
+        <div>
+          <span className='text-muted-foreground'>{t('Target')}: </span>
+          <code>{item.proposed_target}</code>
+        </div>
+      )
+    }
+    return null
+  }
 
   const columns = [
+    {
+      id: 'selected',
+      header: (
+        <Checkbox
+          checked={allSelected}
+          indeterminate={someSelected}
+          onCheckedChange={(checked) => toggleAllChannels(checked === true)}
+          aria-label={t('Select all')}
+        />
+      ),
+      className: 'w-12',
+      cell: (item: ModelAliasChannelPreview) => {
+        const selectedTarget = targetModels[item.channel_id]
+        const canSelect =
+          item.status === 'new' ||
+          item.status === 'updated' ||
+          (item.status === 'multiple_matches' &&
+            item.matched_models.length > 1 &&
+            Boolean(selectedTarget) &&
+            selectedTarget !== item.current_target)
+        return (
+          <Checkbox
+            checked={selectedChannelIdSet.has(item.channel_id)}
+            disabled={!canSelect}
+            onCheckedChange={(checked) =>
+              toggleChannel(item.channel_id, checked === true)
+            }
+            aria-label={t('Select channel')}
+          />
+        )
+      },
+    },
     {
       id: 'channel',
       header: t('Channel'),
@@ -146,23 +303,9 @@ export function ModelAliasPreview({ preview }: ModelAliasPreviewProps) {
     {
       id: 'mapping',
       header: t('Mapping'),
-      className: 'min-w-52',
+      className: 'min-w-[22rem]',
       cell: (item: ModelAliasChannelPreview) => (
-        <div className='text-xs'>
-          {item.current_target ? (
-            <div>
-              <span className='text-muted-foreground'>{t('Current')}: </span>
-              <code>{item.current_target}</code>
-            </div>
-          ) : null}
-          {item.proposed_target ? (
-            <div>
-              <span className='text-muted-foreground'>{t('Target')}: </span>
-              <code>{item.proposed_target}</code>
-            </div>
-          ) : null}
-          {!item.current_target && !item.proposed_target ? '-' : null}
-        </div>
+        <div className='text-xs'>{renderMapping(item) ?? '-'}</div>
       ),
     },
     {
@@ -211,6 +354,14 @@ export function ModelAliasPreview({ preview }: ModelAliasPreviewProps) {
             </Badge>
           )
         })}
+      </div>
+      <div className='flex items-center justify-between gap-3 text-xs'>
+        <span className='text-muted-foreground'>
+          {t('Selected {{count}}', { count: selectedCount })}
+        </span>
+        <span className='text-muted-foreground'>
+          {t('No selection applies all eligible changes.')}
+        </span>
       </div>
       <StaticDataTable
         columns={columns}

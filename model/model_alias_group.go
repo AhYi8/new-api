@@ -84,6 +84,11 @@ type ModelAliasApplyResult struct {
 	Failed  []ModelAliasApplyFailure `json:"failed"`
 }
 
+type ModelAliasApplySelection struct {
+	SelectedChannelIDs []int
+	TargetModels       map[int]string
+}
+
 type ModelAliasScanSummary struct {
 	ScannedGroups   int `json:"scanned_groups"`
 	ScannedChannels int `json:"scanned_channels"`
@@ -477,6 +482,10 @@ func PreviewModelAliasGroup(alias string) (*ModelAliasPreview, error) {
 }
 
 func ApplyModelAliasGroup(alias string) (*ModelAliasApplyResult, error) {
+	return ApplyModelAliasGroupWithSelection(alias, ModelAliasApplySelection{})
+}
+
+func ApplyModelAliasGroupWithSelection(alias string, selection ModelAliasApplySelection) (*ModelAliasApplyResult, error) {
 	group, err := getModelAliasGroup(alias)
 	if err != nil {
 		return nil, err
@@ -487,13 +496,43 @@ func ApplyModelAliasGroup(alias string) (*ModelAliasApplyResult, error) {
 	}
 	preview := buildModelAliasPreview(group, channels)
 	result := &ModelAliasApplyResult{Failed: make([]ModelAliasApplyFailure, 0)}
+	selectedChannelIDs, err := normalizeModelAliasSelectedChannelIDs(selection.SelectedChannelIDs)
+	if err != nil {
+		return nil, err
+	}
+	targetModels, err := normalizeModelAliasTargetModels(selection.TargetModels)
+	if err != nil {
+		return nil, err
+	}
+	hasSelectedChannels := len(selectedChannelIDs) > 0
+	previewChannelIDs := make(map[int]struct{}, len(preview.Items))
+	for _, item := range preview.Items {
+		previewChannelIDs[item.ChannelID] = struct{}{}
+	}
+	for channelID := range selectedChannelIDs {
+		if _, exists := previewChannelIDs[channelID]; !exists {
+			return nil, fmt.Errorf("渠道 %d 不存在于当前预览中", channelID)
+		}
+	}
+	for channelID := range targetModels {
+		if _, exists := previewChannelIDs[channelID]; !exists {
+			return nil, fmt.Errorf("渠道 %d 不存在于当前预览中", channelID)
+		}
+	}
 
 	for _, item := range preview.Items {
-		if item.Status != ModelAliasPreviewStatusNew && item.Status != ModelAliasPreviewStatusUpdated {
+		if hasSelectedChannels {
+			if _, selected := selectedChannelIDs[item.ChannelID]; !selected {
+				result.Skipped++
+				continue
+			}
+		}
+		selectedTarget := targetModels[item.ChannelID]
+		if !isModelAliasApplyCandidate(item, selectedTarget) {
 			result.Skipped++
 			continue
 		}
-		applied, applyErr := applyModelAliasToChannel(item.ChannelID, group)
+		applied, applyErr := applyModelAliasToChannel(item.ChannelID, group, selectedTarget)
 		if applyErr != nil {
 			result.Failed = append(result.Failed, ModelAliasApplyFailure{
 				ChannelID:   item.ChannelID,
@@ -512,6 +551,49 @@ func ApplyModelAliasGroup(alias string) (*ModelAliasApplyResult, error) {
 		InitChannelCache()
 	}
 	return result, nil
+}
+
+func normalizeModelAliasSelectedChannelIDs(channelIDs []int) (map[int]struct{}, error) {
+	selected := make(map[int]struct{}, len(channelIDs))
+	for _, channelID := range channelIDs {
+		if channelID <= 0 {
+			return nil, errors.New("渠道 ID 无效")
+		}
+		selected[channelID] = struct{}{}
+	}
+	return selected, nil
+}
+
+func normalizeModelAliasTargetModels(targets map[int]string) (map[int]string, error) {
+	normalized := make(map[int]string, len(targets))
+	for channelID, target := range targets {
+		if channelID <= 0 {
+			return nil, errors.New("渠道 ID 无效")
+		}
+		target = strings.TrimSpace(target)
+		if target == "" {
+			continue
+		}
+		if err := validateModelAliasName(target, "目标模型名称"); err != nil {
+			return nil, err
+		}
+		normalized[channelID] = target
+	}
+	return normalized, nil
+}
+
+func isModelAliasApplyCandidate(item ModelAliasChannelPreview, selectedTarget string) bool {
+	if item.Status == ModelAliasPreviewStatusNew || item.Status == ModelAliasPreviewStatusUpdated {
+		return true
+	}
+	if selectedTarget == "" || selectedTarget == item.CurrentTarget {
+		return false
+	}
+	if item.Status != ModelAliasPreviewStatusMultipleMatches {
+		return false
+	}
+	// 非法目标仍需进入行锁内校验，以便向调用方返回明确的失败原因。
+	return true
 }
 
 func InvalidateModelAliasPendingCount(alias string) error {
@@ -730,11 +812,6 @@ func classifyModelAliasChannel(channel *Channel, group ModelAliasGroup) (ModelAl
 		item.Reason = "no_matching_model"
 		return item, nil
 	}
-	if len(item.MatchedModels) > 1 {
-		item.Status = ModelAliasPreviewStatusMultipleMatches
-		item.Reason = "multiple_matching_models"
-		return item, nil
-	}
 
 	mapping, err := parseModelAliasChannelMapping(channel.ModelMapping)
 	if err != nil {
@@ -744,6 +821,19 @@ func classifyModelAliasChannel(channel *Channel, group ModelAliasGroup) (ModelAl
 	}
 	currentTarget, mappingExists := mapping[group.Alias]
 	item.CurrentTarget = strings.TrimSpace(currentTarget)
+
+	if len(item.MatchedModels) > 1 {
+		// 多匹配状态表达候选歧义；已有有效映射只用于回填下拉框，不能改变该状态。
+		if mappingExists && containsExactModel(item.MatchedModels, item.CurrentTarget) &&
+			modelAliasMappingWouldCycle(mapping, group.Alias, item.CurrentTarget) {
+			item.Status = ModelAliasPreviewStatusConflict
+			item.Reason = "mapping_target_conflict"
+			return item, mapping
+		}
+		item.Status = ModelAliasPreviewStatusMultipleMatches
+		item.Reason = "multiple_matching_models"
+		return item, mapping
+	}
 
 	item.ProposedTarget = item.MatchedModels[0]
 	_, aliasInModels := channelModelSet[group.Alias]
@@ -803,7 +893,7 @@ func modelAliasMappingWouldCycle(mapping map[string]string, alias string, target
 	return false
 }
 
-func applyModelAliasToChannel(channelID int, group ModelAliasGroup) (bool, error) {
+func applyModelAliasToChannel(channelID int, group ModelAliasGroup, selectedTarget string) (bool, error) {
 	applied := false
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var channel Channel
@@ -812,8 +902,20 @@ func applyModelAliasToChannel(channelID int, group ModelAliasGroup) (bool, error
 		}
 		// 预览和实际执行之间可能发生人工修改，因此必须在行锁内重新判断。
 		item, mapping := classifyModelAliasChannel(&channel, group)
-		if item.Status != ModelAliasPreviewStatusNew && item.Status != ModelAliasPreviewStatusUpdated {
+		if mapping == nil {
+			mapping = make(map[string]string)
+		}
+		if selectedTarget != "" {
+			if !containsExactModel(item.MatchedModels, selectedTarget) {
+				return fmt.Errorf("渠道 %d 的目标模型不在匹配结果中", channelID)
+			}
+			item.ProposedTarget = selectedTarget
+		}
+		if !isModelAliasApplyCandidate(item, selectedTarget) {
 			return nil
+		}
+		if modelAliasMappingWouldCycle(mapping, group.Alias, item.ProposedTarget) {
+			return fmt.Errorf("渠道 %d 的目标模型会形成循环映射", channelID)
 		}
 
 		mapping[group.Alias] = item.ProposedTarget

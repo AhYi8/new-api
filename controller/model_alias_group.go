@@ -17,7 +17,9 @@ type updateModelAliasGroupsRequest struct {
 }
 
 type modelAliasGroupRequest struct {
-	Alias string `json:"alias"`
+	Alias              string         `json:"alias"`
+	SelectedChannelIDs []int          `json:"selected_channel_ids"`
+	TargetModels       map[int]string `json:"target_models"`
 }
 
 func GetModelAliasGroups(c *gin.Context) {
@@ -71,11 +73,11 @@ func UpdateModelAliasGroups(c *gin.Context) {
 }
 
 func PreviewModelAliasGroup(c *gin.Context) {
-	alias, ok := bindModelAliasGroupRequest(c)
+	request, ok := bindModelAliasGroupRequest(c)
 	if !ok {
 		return
 	}
-	preview, err := model.PreviewModelAliasGroup(alias)
+	preview, err := model.PreviewModelAliasGroup(request.Alias)
 	if err != nil {
 		common.ApiErrorMsg(c, err.Error())
 		return
@@ -84,21 +86,24 @@ func PreviewModelAliasGroup(c *gin.Context) {
 }
 
 func ApplyModelAliasGroup(c *gin.Context) {
-	alias, ok := bindModelAliasGroupRequest(c)
+	request, ok := bindModelAliasGroupRequest(c)
 	if !ok {
 		return
 	}
-	result, err := model.ApplyModelAliasGroup(alias)
+	result, err := model.ApplyModelAliasGroupWithSelection(request.Alias, model.ModelAliasApplySelection{
+		SelectedChannelIDs: request.SelectedChannelIDs,
+		TargetModels:       request.TargetModels,
+	})
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	if err = model.InvalidateModelAliasPendingCount(alias); err != nil {
+	if err = model.InvalidateModelAliasPendingCount(request.Alias); err != nil {
 		common.SysLog("模型别名待处理数量失效失败: " + err.Error())
 	}
 	requestModelAliasScan()
 	recordManageAudit(c, "model_alias_group.apply", map[string]interface{}{
-		"alias":         alias,
+		"alias":         request.Alias,
 		"applied_count": result.Applied,
 		"failed_count":  len(result.Failed),
 	})
@@ -119,16 +124,16 @@ func requestModelAliasScan() {
 	}
 }
 
-func bindModelAliasGroupRequest(c *gin.Context) (string, bool) {
+func bindModelAliasGroupRequest(c *gin.Context) (modelAliasGroupRequest, bool) {
 	var request modelAliasGroupRequest
 	if err := common.DecodeJson(c.Request.Body, &request); err != nil {
 		common.ApiErrorMsg(c, "无效的模型别名组参数")
-		return "", false
+		return modelAliasGroupRequest{}, false
 	}
 	request.Alias = strings.TrimSpace(request.Alias)
 	if request.Alias == "" {
 		common.ApiErrorMsg(c, "统一名称不能为空")
-		return "", false
+		return modelAliasGroupRequest{}, false
 	}
-	return request.Alias, true
+	return request, true
 }

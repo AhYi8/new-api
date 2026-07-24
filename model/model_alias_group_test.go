@@ -204,6 +204,159 @@ func TestModelAliasGroupPreviewAndApply(t *testing.T) {
 	assert.Empty(t, secondResult.Failed)
 }
 
+func TestApplyModelAliasGroupWithSelectionAppliesOnlySelectedChannels(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	_, err := SaveModelAliasGroups([]ModelAliasGroup{
+		{Alias: "deepseek-v4-pro", Models: []string{"vendor/a", "vendor/b"}},
+	})
+	require.NoError(t, err)
+
+	channels := []*Channel{
+		newModelAliasTestChannel("渠道 A", "vendor/a", nil),
+		newModelAliasTestChannel("渠道 B", "vendor/b", nil),
+	}
+	for _, channel := range channels {
+		require.NoError(t, DB.Create(channel).Error)
+		require.NoError(t, channel.AddAbilities(DB))
+	}
+
+	result, err := ApplyModelAliasGroupWithSelection("deepseek-v4-pro", ModelAliasApplySelection{
+		SelectedChannelIDs: []int{channels[1].Id},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Applied)
+	assert.Equal(t, 1, result.Skipped)
+	assert.Empty(t, result.Failed)
+
+	assertModelAliasChannel(t, channels[1].Id, "vendor/b", true)
+	var skippedChannel Channel
+	require.NoError(t, DB.First(&skippedChannel, channels[0].Id).Error)
+	assert.NotContains(t, skippedChannel.GetModels(), "deepseek-v4-pro")
+}
+
+func TestApplyModelAliasGroupWithSelectionAppliesSelectedMultipleMatchTarget(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	_, err := SaveModelAliasGroups([]ModelAliasGroup{
+		{Alias: "deepseek-v4-pro", Models: []string{"vendor/a", "vendor/b"}},
+	})
+	require.NoError(t, err)
+	channel := newModelAliasTestChannel("多匹配", "vendor/a,vendor/b", nil)
+	require.NoError(t, DB.Create(channel).Error)
+	require.NoError(t, channel.AddAbilities(DB))
+
+	result, err := ApplyModelAliasGroupWithSelection("deepseek-v4-pro", ModelAliasApplySelection{
+		SelectedChannelIDs: []int{channel.Id},
+		TargetModels:       map[int]string{channel.Id: "vendor/b"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Applied)
+	assert.Zero(t, result.Skipped)
+	assert.Empty(t, result.Failed)
+	assertModelAliasChannel(t, channel.Id, "vendor/b", true)
+
+	preview, err := PreviewModelAliasGroup("deepseek-v4-pro")
+	require.NoError(t, err)
+	require.Len(t, preview.Items, 1)
+	assert.Equal(t, ModelAliasPreviewStatusMultipleMatches, preview.Items[0].Status)
+	assert.Equal(t, "vendor/b", preview.Items[0].CurrentTarget)
+	assert.Empty(t, preview.Items[0].ProposedTarget)
+	assert.Zero(t, preview.Counts[ModelAliasPreviewStatusUnchanged])
+	assert.Equal(t, 1, preview.Counts[ModelAliasPreviewStatusMultipleMatches])
+
+	result, err = ApplyModelAliasGroupWithSelection("deepseek-v4-pro", ModelAliasApplySelection{
+		SelectedChannelIDs: []int{channel.Id},
+		TargetModels:       map[int]string{channel.Id: "vendor/a"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Applied)
+	assert.Zero(t, result.Skipped)
+	assert.Empty(t, result.Failed)
+	assertModelAliasChannel(t, channel.Id, "vendor/a", true)
+}
+
+func TestApplyModelAliasGroupWithSelectionRejectsInvalidTarget(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	_, err := SaveModelAliasGroups([]ModelAliasGroup{
+		{Alias: "deepseek-v4-pro", Models: []string{"vendor/a", "vendor/b"}},
+	})
+	require.NoError(t, err)
+	channel := newModelAliasTestChannel("多匹配", "vendor/a,vendor/b", nil)
+	require.NoError(t, DB.Create(channel).Error)
+	require.NoError(t, channel.AddAbilities(DB))
+
+	result, err := ApplyModelAliasGroupWithSelection("deepseek-v4-pro", ModelAliasApplySelection{
+		SelectedChannelIDs: []int{channel.Id},
+		TargetModels:       map[int]string{channel.Id: "outside/model"},
+	})
+	require.NoError(t, err)
+	assert.Zero(t, result.Applied)
+	assert.Zero(t, result.Skipped)
+	require.Len(t, result.Failed, 1)
+	assert.Contains(t, result.Failed[0].Error, "目标模型不在匹配结果中")
+
+	var unchanged Channel
+	require.NoError(t, DB.First(&unchanged, channel.Id).Error)
+	assert.NotContains(t, unchanged.GetModels(), "deepseek-v4-pro")
+}
+
+func TestApplyModelAliasGroupWithSelectionRejectsInvalidChannelIDs(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	_, err := SaveModelAliasGroups([]ModelAliasGroup{
+		{Alias: "deepseek-v4-pro", Models: []string{"vendor/a"}},
+	})
+	require.NoError(t, err)
+	channel := newModelAliasTestChannel("渠道 A", "vendor/a", nil)
+	require.NoError(t, DB.Create(channel).Error)
+	require.NoError(t, channel.AddAbilities(DB))
+
+	tests := []struct {
+		name      string
+		channelID int
+	}{
+		{name: "非正数渠道 ID", channelID: 0},
+		{name: "预览外渠道 ID", channelID: channel.Id + 1000},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := ApplyModelAliasGroupWithSelection("deepseek-v4-pro", ModelAliasApplySelection{
+				SelectedChannelIDs: []int{test.channelID},
+			})
+			require.Error(t, err)
+
+			var unchanged Channel
+			require.NoError(t, DB.First(&unchanged, channel.Id).Error)
+			assert.NotContains(t, unchanged.GetModels(), "deepseek-v4-pro")
+		})
+	}
+}
+
+func TestApplyModelAliasGroupWithSelectionRejectsCyclicMultipleMatchTarget(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	_, err := SaveModelAliasGroups([]ModelAliasGroup{
+		{Alias: "deepseek-v4-pro", Models: []string{"vendor/a", "vendor/b"}},
+	})
+	require.NoError(t, err)
+	channel := newModelAliasTestChannel("多匹配", "vendor/a,vendor/b", map[string]string{
+		"vendor/a": "deepseek-v4-pro",
+	})
+	require.NoError(t, DB.Create(channel).Error)
+	require.NoError(t, channel.AddAbilities(DB))
+
+	result, err := ApplyModelAliasGroupWithSelection("deepseek-v4-pro", ModelAliasApplySelection{
+		SelectedChannelIDs: []int{channel.Id},
+		TargetModels:       map[int]string{channel.Id: "vendor/a"},
+	})
+	require.NoError(t, err)
+	assert.Zero(t, result.Applied)
+	assert.Zero(t, result.Skipped)
+	require.Len(t, result.Failed, 1)
+	assert.Contains(t, result.Failed[0].Error, "循环映射")
+
+	var unchanged Channel
+	require.NoError(t, DB.First(&unchanged, channel.Id).Error)
+	assert.NotContains(t, unchanged.GetModels(), "deepseek-v4-pro")
+}
+
 func TestModelAliasScanCountsPendingChannelsAndKeepsLastSuccessfulResult(t *testing.T) {
 	setupModelAliasGroupTest(t)
 	configuration, err := SaveModelAliasConfiguration([]ModelAliasGroup{

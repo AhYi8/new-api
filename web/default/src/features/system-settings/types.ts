@@ -296,6 +296,12 @@ export type ModelAliasApplyResult = {
   failed: ModelAliasApplyFailure[]
 }
 
+export type ModelAliasApplyRequest = {
+  alias: string
+  selected_channel_ids?: number[]
+  target_models?: Record<number, string>
+}
+
 export type ModelAliasGroupsResponse = {
   success: boolean
   message: string
