@@ -56,6 +56,11 @@ export const channelsQueryKeys = {
   detail: (id: number) => [...channelsQueryKeys.details(), id] as const,
 }
 
+export const channelGroupUpdateMutationKey = [
+  ...channelsQueryKeys.all,
+  'group-update',
+] as const
+
 function getChannelTestResponseTime(
   response: ChannelTestResponse
 ): number | undefined {
@@ -229,6 +234,41 @@ export async function handleUpdateChannelField(
   } catch {
     toast.error(i18next.t(ERROR_MESSAGES.UPDATE_FAILED))
   }
+}
+
+/**
+ * 更新单个渠道的分组，并向调用方返回是否成功以保留或确认本地草稿。
+ */
+export async function handleUpdateChannelGroups(
+  id: number,
+  group: string,
+  queryClient?: QueryClient
+): Promise<boolean> {
+  let response: Awaited<ReturnType<typeof updateChannel>>
+  try {
+    response = await updateChannel(id, { group })
+  } catch {
+    toast.error(i18next.t(ERROR_MESSAGES.UPDATE_FAILED))
+    return false
+  }
+
+  if (!response.success) {
+    toast.error(response.message || i18next.t(ERROR_MESSAGES.UPDATE_FAILED))
+    return false
+  }
+
+  toast.success(i18next.t(SUCCESS_MESSAGES.UPDATED))
+  if (queryClient) {
+    try {
+      await queryClient.invalidateQueries({
+        queryKey: channelsQueryKeys.lists(),
+      })
+    } catch {
+      // 服务端更新已经成功，缓存刷新异常不应把本次保存误报为失败。
+    }
+  }
+
+  return true
 }
 
 /**

@@ -49,6 +49,10 @@ interface MultiSelectProps {
   options: Option[]
   selected: string[]
   onChange: (values: string[]) => void
+  /** 当前选择在回车或整个组合框失焦后需要提交时触发。 */
+  onCommit?: (values: string[]) => void
+  /** 当前选择需要撤销时触发。 */
+  onCancel?: () => void
   placeholder?: string
   className?: string
   allowCreate?: boolean
@@ -128,14 +132,61 @@ export function MultiSelect(props: MultiSelectProps) {
   const { t } = useTranslation()
   const placeholder = props.placeholder ?? t('Select items...')
   const readOnly = props.readOnly === true
+  const onChange = props.onChange
+  const onCommit = props.onCommit
 
   // Anchor the popup to the chips container so its width tracks the entire
   // input row, not just the leftover space at the end of wrapped chips.
   const chipsAnchorRef = useComboboxAnchor()
+  const contentRef = React.useRef<HTMLDivElement | null>(null)
+  const selectedRef = React.useRef(props.selected)
+  const openRef = React.useRef(false)
+  const commitFrameRef = React.useRef<number | null>(null)
+  const commitValuesRef = React.useRef<string[] | null>(null)
+  selectedRef.current = props.selected
 
   const [inputValue, setInputValue] = React.useState('')
   const [open, setOpen] = React.useState(false)
   const [expanded, setExpanded] = React.useState(false)
+
+  const scheduleCommit = React.useCallback(
+    (checkFocus: boolean) => {
+      if (!onCommit) return
+      if (commitFrameRef.current !== null) {
+        cancelAnimationFrame(commitFrameRef.current)
+      }
+      commitValuesRef.current = [...selectedRef.current]
+      commitFrameRef.current = requestAnimationFrame(() => {
+        const values = commitValuesRef.current ?? selectedRef.current
+        commitFrameRef.current = null
+        commitValuesRef.current = null
+        if (checkFocus) {
+          const activeElement = document.activeElement
+          const focusInChips =
+            activeElement !== null &&
+            chipsAnchorRef.current?.contains(activeElement)
+          const focusInPopup =
+            activeElement !== null &&
+            contentRef.current?.contains(activeElement)
+          if (openRef.current || focusInChips || focusInPopup) {
+            return
+          }
+        }
+        onCommit(values)
+      })
+    },
+    [chipsAnchorRef, onCommit]
+  )
+
+  React.useEffect(
+    () => () => {
+      if (commitFrameRef.current !== null) {
+        cancelAnimationFrame(commitFrameRef.current)
+      }
+      commitValuesRef.current = null
+    },
+    []
+  )
 
   const selectedSet = React.useMemo(
     () => new Set(props.selected),
@@ -185,7 +236,7 @@ export function MultiSelect(props: MultiSelectProps) {
     (values: string[]) => {
       if (readOnly) return
       const next: string[] = []
-      const seen = new Set<string>(props.selected)
+      const seen = new Set<string>(selectedRef.current)
       for (const raw of values) {
         const value = raw.trim()
         if (!value) continue
@@ -194,9 +245,14 @@ export function MultiSelect(props: MultiSelectProps) {
         next.push(value)
       }
       if (next.length === 0) return
-      props.onChange([...props.selected, ...next])
+      const selected = [...selectedRef.current, ...next]
+      selectedRef.current = selected
+      if (commitFrameRef.current !== null) {
+        commitValuesRef.current = [...selected]
+      }
+      onChange(selected)
     },
-    [props, readOnly]
+    [onChange, readOnly]
   )
 
   const handleInputValueChange = (value: string) => {
@@ -215,12 +271,25 @@ export function MultiSelect(props: MultiSelectProps) {
 
   const handleValueChange = (next: string[]) => {
     if (readOnly) return
-    props.onChange(next)
+    const previousLength = selectedRef.current.length
+    selectedRef.current = next
+    if (commitFrameRef.current !== null) {
+      commitValuesRef.current = [...next]
+    }
+    onChange(next)
     // When an item is picked (multiple mode), Base UI keeps the input but most
     // UX patterns clear it. Clearing once a value is added makes batch picking
     // feel snappier and matches popular chip-style multiselects.
-    if (next.length > props.selected.length) {
+    if (next.length > previousLength) {
       setInputValue('')
+    }
+  }
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    openRef.current = nextOpen
+    setOpen(nextOpen)
+    if (!nextOpen) {
+      scheduleCommit(true)
     }
   }
 
@@ -259,20 +328,38 @@ export function MultiSelect(props: MultiSelectProps) {
   )
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Escape' && props.onCancel) {
+      event.preventDefault()
+      event.stopPropagation()
+      if (commitFrameRef.current !== null) {
+        cancelAnimationFrame(commitFrameRef.current)
+        commitFrameRef.current = null
+      }
+      commitValuesRef.current = null
+      openRef.current = false
+      setOpen(false)
+      setInputValue('')
+      props.onCancel()
+      return
+    }
+
     // Enter without a highlighted option commits the typed value.
     if (event.key === 'Enter' && props.allowCreate && canCreate) {
       // Only fire when Base UI has no highlighted item to select. We rely on
       // the highlighted item's data attribute on the popup. If the popup is
       // closed or empty, manually commit the typed value.
-      const popup = document.querySelector<HTMLElement>(
-        '[data-slot="combobox-content"][data-open]'
-      )
-      const hasHighlight = popup?.querySelector('[data-highlighted]') != null
+      const hasHighlight =
+        contentRef.current?.querySelector('[data-highlighted]') != null
       if (!hasHighlight) {
         event.preventDefault()
         addValues([trimmedInput])
         setInputValue('')
       }
+    }
+
+    if (event.key === 'Enter') {
+      // Base UI 会在当前键盘事件结束前应用高亮选项，下一帧再读取最新值可避免提交旧草稿。
+      scheduleCommit(false)
     }
   }
 
@@ -285,13 +372,14 @@ export function MultiSelect(props: MultiSelectProps) {
       inputValue={inputValue}
       onInputValueChange={handleInputValueChange}
       open={open}
-      onOpenChange={setOpen}
+      onOpenChange={handleOpenChange}
       disabled={props.disabled}
     >
       <ComboboxChips
         ref={chipsAnchorRef}
         className={cn('w-full', props.className)}
         aria-readonly={readOnly}
+        onBlurCapture={() => scheduleCommit(true)}
       >
         <ComboboxValue>
           {(values: string[]) => {
@@ -411,7 +499,7 @@ export function MultiSelect(props: MultiSelectProps) {
         />
       </ComboboxChips>
 
-      <ComboboxContent anchor={chipsAnchorRef}>
+      <ComboboxContent ref={contentRef} anchor={chipsAnchorRef}>
         <ComboboxList>
           <ComboboxCollection>
             {(item: string) => {

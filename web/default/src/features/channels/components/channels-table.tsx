@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery } from '@tanstack/react-query'
+import { useIsMutating, useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import type {
   ColumnFiltersState,
@@ -54,6 +54,7 @@ import {
 } from '../constants'
 import {
   channelsQueryKeys,
+  channelGroupUpdateMutationKey,
   aggregateChannelsByTag,
   isTagAggregateRow,
   getChannelTypeIcon,
@@ -203,7 +204,11 @@ export function ChannelsTable() {
   }
 
   // Fetch groups for filter
-  const { data: groupsData } = useQuery({
+  const {
+    data: groupsData,
+    isLoading: isGroupsLoading,
+    isError: isGroupsError,
+  } = useQuery({
     queryKey: ['groups'],
     queryFn: getGroups,
   })
@@ -216,6 +221,10 @@ export function ChannelsTable() {
       })),
     [groupsData]
   )
+  const groupsReady =
+    groupsData?.success === true && !isGroupsLoading && !isGroupsError
+  const isUpdatingChannelGroups =
+    useIsMutating({ mutationKey: channelGroupUpdateMutationKey }) > 0
 
   // Fetch channels data
   // eslint-disable-next-line @tanstack/query/exhaustive-deps
@@ -304,7 +313,11 @@ export function ChannelsTable() {
   const typeCounts = data?.data?.type_counts
 
   // Columns configuration
-  const columns = useChannelsColumns({ enableSelection: batchMode })
+  const columns = useChannelsColumns({
+    enableSelection: batchMode,
+    groupOptions,
+    groupsReady,
+  })
 
   // React Table instance
   const { table } = useDataTable({
@@ -410,7 +423,7 @@ export function ChannelsTable() {
       table={table}
       columns={columns}
       isLoading={isLoading}
-      isFetching={isFetching}
+      isFetching={isFetching || isUpdatingChannelGroups}
       emptyTitle={t('No Channels Found')}
       emptyDescription={t(
         'No channels available. Create your first channel to get started.'

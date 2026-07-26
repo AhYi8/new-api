@@ -20,11 +20,10 @@ import { flexRender, type Row } from '@tanstack/react-table'
 import { memo } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { GroupBadge } from '@/components/group-badge'
 import { cn } from '@/lib/utils'
 
 import { CHANNEL_STATUS } from '../constants'
-import { isTagAggregateRow, parseGroupsList } from '../lib'
+import { isTagAggregateRow } from '../lib'
 import type { Channel } from '../types'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
 import { useChannels } from './channels-provider'
@@ -65,8 +64,6 @@ function ChannelCardComponent({
     test_time: t('Last Tested'),
   }
 
-  const groups = parseGroupsList(row.original.group ?? '')
-
   const selectCell = renderCell('select')
   const typeCell = renderCell('type')
   const nameCell = renderCell('name')
@@ -77,6 +74,7 @@ function ChannelCardComponent({
   const balanceCell = renderCell('balance')
   const responseCell = renderCell('response_time')
   const testCell = renderCell('test_time')
+  const groupCell = renderCell('group')
 
   const labelClass = 'text-muted-foreground text-[11px] font-medium select-none'
 
@@ -156,23 +154,8 @@ function ChannelCardComponent({
           </div>
         </div>
 
-        {/* Last row: groups span the full width, showing every group (no label) */}
-        <div className='min-w-0'>
-          {groups.length > 0 ? (
-            <div className='-ml-1.5 flex flex-wrap gap-1'>
-              {groups.map((g) => (
-                <GroupBadge
-                  key={g}
-                  group={g}
-                  label={sensitiveVisible ? undefined : SENSITIVE_MASK}
-                  size='sm'
-                />
-              ))}
-            </div>
-          ) : (
-            <span className='text-muted-foreground text-sm'>-</span>
-          )}
-        </div>
+        {/* 分组复用表格列渲染器，保证表格与卡片的提交行为一致。 */}
+        <div className='min-w-0'>{groupCell}</div>
       </div>
     </ChannelRowActionsLayoutContext.Provider>
   )

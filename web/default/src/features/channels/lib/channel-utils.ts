@@ -229,6 +229,14 @@ export function parseModelsList(models: string): string[] {
     .filter((m) => m.length > 0)
 }
 
+const DEFAULT_CHANNEL_GROUP = 'default'
+
+function compareChannelGroups(a: string, b: string): number {
+  if (a === DEFAULT_CHANNEL_GROUP) return -1
+  if (b === DEFAULT_CHANNEL_GROUP) return 1
+  return a.localeCompare(b)
+}
+
 /**
  * Parse comma-separated groups list.
  * Sorts with 'default' group first, then locale-sorted alphabetically.
@@ -241,15 +249,7 @@ export function parseGroupsList(groups: string): string[] {
     .split(',')
     .map((g) => g.trim())
     .filter((g) => g.length > 0)
-  return list.sort((a, b) => {
-    if (a === 'default') {
-      return -1
-    }
-    if (b === 'default') {
-      return 1
-    }
-    return a.localeCompare(b)
-  })
+  return list.sort(compareChannelGroups)
 }
 
 /**
@@ -264,6 +264,44 @@ export function formatModelsString(models: string[]): string {
  */
 export function formatGroupsString(groups: string[]): string {
   return groups.join(',')
+}
+
+export interface ChannelGroupUpdatePreparation {
+  groups: string[]
+  value: string
+  isValid: boolean
+  hasChanges: boolean
+}
+
+/**
+ * 规范化渠道分组，去除空白和重复项，并保持 default 优先展示。
+ */
+export function normalizeChannelGroups(groups: readonly string[]): string[] {
+  return [...new Set(groups.map((group) => group.trim()))]
+    .filter(Boolean)
+    .sort(compareChannelGroups)
+}
+
+/**
+ * 规范化渠道分组并判断是否需要更新。
+ * 分组按集合处理，避免空白、重复项或顺序变化产生无效请求。
+ */
+export function prepareChannelGroupUpdate(
+  currentGroup: string,
+  draftGroups: readonly string[]
+): ChannelGroupUpdatePreparation {
+  const groups = normalizeChannelGroups(draftGroups)
+  const currentGroups = normalizeChannelGroups(parseGroupsList(currentGroup))
+  const value = formatGroupsString(groups)
+
+  return {
+    groups,
+    value,
+    isValid: groups.length > 0,
+    hasChanges:
+      groups.length !== currentGroups.length ||
+      groups.some((group, index) => group !== currentGroups[index]),
+  }
 }
 
 // ============================================================================

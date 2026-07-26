@@ -33,7 +33,7 @@ import { toast } from 'sonner'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { BadgeListCell } from '@/components/data-table'
-import { GroupBadge } from '@/components/group-badge'
+import type { Option } from '@/components/multi-select'
 import { ProviderBadge } from '@/components/provider-badge'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
 import { TableId } from '@/components/table-id'
@@ -46,12 +46,12 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { toIntlLocale } from '@/i18n/languages'
 import {
   formatCurrencyFromUSD,
   formatQuotaWithCurrency,
   getCurrencyLabel,
 } from '@/lib/currency'
-import { toIntlLocale } from '@/i18n/languages'
 import { formatTimestampToDate } from '@/lib/format'
 import { truncateText } from '@/lib/utils'
 
@@ -76,6 +76,7 @@ import {
 } from '../lib'
 import { parseUpstreamUpdateMeta } from '../lib/upstream-update-utils'
 import type { Channel } from '../types'
+import { ChannelGroupsCell } from './channel-groups-cell'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
 import { useChannels } from './channels-provider'
 import { DataTableRowActions } from './data-table-row-actions'
@@ -85,6 +86,8 @@ import {
   type CodexUsageDialogData,
 } from './dialogs/codex-usage-dialog'
 import { NumericSpinnerInput } from './numeric-spinner-input'
+
+const EMPTY_GROUP_OPTIONS: Option[] = []
 
 function parseIonetMeta(otherInfo: string | null | undefined): null | {
   source?: string
@@ -512,14 +515,16 @@ function BalanceCell({ channel }: { channel: Channel }) {
 /**
  * Generate channels columns configuration
  */
-export function useChannelsColumns(
-  options: {
-    enableSelection?: boolean
-  } = {}
-): ColumnDef<Channel>[] {
+export function useChannelsColumns(options?: {
+  enableSelection?: boolean
+  groupOptions?: Option[]
+  groupsReady?: boolean
+}): ColumnDef<Channel>[] {
   const { t, i18n } = useTranslation()
   const { sensitiveVisible } = useChannels()
-  const enableSelection = options.enableSelection ?? true
+  const enableSelection = options?.enableSelection ?? true
+  const groupOptions = options?.groupOptions ?? EMPTY_GROUP_OPTIONS
+  const groupsReady = options?.groupsReady ?? false
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   // The column definitions only depend on the translation function, the active
   // locale, and sensitive-data visibility. Memoizing keeps the array (and every
@@ -986,22 +991,14 @@ export function useChannelsColumns(
         accessorKey: 'group',
         header: t('Groups'),
         meta: { mobileHidden: true },
-        cell: ({ row }) => {
-          const group = row.getValue('group') as string
-          const groupArray = parseGroupsList(group)
-          return (
-            <BadgeListCell
-              items={groupArray.map((g) => (
-                <GroupBadge
-                  key={g}
-                  group={g}
-                  label={sensitiveVisible ? undefined : SENSITIVE_MASK}
-                  size='sm'
-                />
-              ))}
-            />
-          )
-        },
+        cell: ({ row }) => (
+          <ChannelGroupsCell
+            channel={row.original}
+            options={groupOptions}
+            optionsReady={groupsReady}
+            sensitiveVisible={sensitiveVisible}
+          />
+        ),
         filterFn: (row, id, value) => {
           if (!value || value.length === 0 || value.includes('all')) {
             return true
@@ -1010,7 +1007,7 @@ export function useChannelsColumns(
           const groupArray = parseGroupsList(group)
           return groupArray.some((g) => value.includes(g))
         },
-        size: 150,
+        size: 320,
         enableSorting: false,
       },
 
@@ -1153,6 +1150,6 @@ export function useChannelsColumns(
         meta: { pinned: 'right' as const },
       },
     ],
-    [enableSelection, t, locale, sensitiveVisible]
+    [enableSelection, groupOptions, groupsReady, t, locale, sensitiveVisible]
   )
 }

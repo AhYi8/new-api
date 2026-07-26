@@ -26,8 +26,11 @@ type ChannelMultiSelectControlProps = {
   options: Option[]
   selected: string[]
   onChange?: (values: string[]) => void
+  onCommit?: (values: string[]) => void
+  onCancel?: () => void
   disabled?: boolean
   readOnly?: boolean
+  className?: string
 }
 
 const ignoreChanges = () => undefined
@@ -61,8 +64,11 @@ export function ChannelGroupsControl({
   options,
   selected,
   onChange = ignoreChanges,
+  onCommit,
+  onCancel,
   disabled,
   readOnly,
+  className,
 }: ChannelMultiSelectControlProps) {
   const { t } = useTranslation()
 
@@ -71,9 +77,12 @@ export function ChannelGroupsControl({
       options={options}
       selected={selected}
       onChange={onChange}
+      onCommit={onCommit}
+      onCancel={onCancel}
       placeholder={t(FIELD_PLACEHOLDERS.GROUP)}
       disabled={disabled}
       readOnly={readOnly}
+      className={className}
     />
   )
 }
