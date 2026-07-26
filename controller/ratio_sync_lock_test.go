@@ -1,10 +1,16 @@
 package controller
 
 import (
+	"bytes"
 	"math"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -41,6 +47,45 @@ func TestNormalizePricingSyncResolutions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, normalized, "model")
 	assert.Equal(t, 0.0, normalized["model"]["model_price"])
+}
+
+func TestNormalizeModelPricingLocksRequest(t *testing.T) {
+	locked := true
+	modelNames, normalizedLocked, err := normalizeModelPricingLocksRequest(modelPricingLocksRequest{
+		ModelNames: []string{" model-b ", "model-a"},
+		Locked:     &locked,
+	})
+	require.NoError(t, err)
+	assert.True(t, normalizedLocked)
+	assert.Equal(t, []string{"model-a", "model-b"}, modelNames)
+}
+
+func TestUpdateModelPricingLocksRejectsInvalidRequests(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	locked := true
+	testCases := []struct {
+		name    string
+		request modelPricingLocksRequest
+	}{
+		{name: "缺少锁定状态", request: modelPricingLocksRequest{ModelNames: []string{"model"}}},
+		{name: "空模型列表", request: modelPricingLocksRequest{Locked: &locked}},
+		{name: "空模型名", request: modelPricingLocksRequest{ModelNames: []string{" "}, Locked: &locked}},
+		{name: "模型名过长", request: modelPricingLocksRequest{ModelNames: []string{strings.Repeat("a", maxPricingSyncModelNameBytes+1)}, Locked: &locked}},
+		{name: "规范化后重复", request: modelPricingLocksRequest{ModelNames: []string{"model", " model "}, Locked: &locked}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			body, err := common.Marshal(testCase.request)
+			require.NoError(t, err)
+			recorder := httptest.NewRecorder()
+			context, _ := gin.CreateTestContext(recorder)
+			context.Request = httptest.NewRequest(http.MethodPut, "/api/ratio_sync/locks", bytes.NewReader(body))
+
+			UpdateModelPricingLocks(context)
+
+			assert.Equal(t, http.StatusBadRequest, recorder.Code)
+		})
+	}
 }
 
 func TestFilterLockedPricingDifferences(t *testing.T) {

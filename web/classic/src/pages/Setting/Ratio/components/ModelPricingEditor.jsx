@@ -17,7 +17,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   Banner,
   Button,
@@ -107,8 +113,13 @@ export default function ModelPricingEditor({
   const [newModelName, setNewModelName] = useState('');
   const [lockedModels, setLockedModels] = useState([]);
   const [pendingLockModel, setPendingLockModel] = useState('');
+  const [pendingBatchLock, setPendingBatchLock] = useState(null);
   const [locksReady, setLocksReady] = useState(false);
   const [locksLoading, setLocksLoading] = useState(true);
+  // 状态值负责界面反馈，引用值用于同步阻止连点，并避免过期刷新覆盖最新锁状态。
+  const lockOperationPendingRef = useRef(false);
+  const locksReadyRef = useRef(false);
+  const lockRefreshRequestIdRef = useRef(0);
 
   const {
     selectedModel,
@@ -147,6 +158,10 @@ export default function ModelPricingEditor({
   });
 
   const refreshLocks = useCallback(async () => {
+    if (lockOperationPendingRef.current) return;
+
+    const requestId = ++lockRefreshRequestIdRef.current;
+    locksReadyRef.current = false;
     setLocksLoading(true);
     setLocksReady(false);
     try {
@@ -158,28 +173,46 @@ export default function ModelPricingEditor({
           response?.data?.message || t('Failed to load price locks'),
         );
       }
+      if (requestId !== lockRefreshRequestIdRef.current) return;
       setLockedModels(response.data.data?.locked_models || []);
+      locksReadyRef.current = true;
       setLocksReady(true);
     } catch (error) {
+      if (requestId !== lockRefreshRequestIdRef.current) return;
       console.error(error);
-      showError(t('Failed to load price locks'));
+      showError(
+        error?.response?.data?.message ||
+          error?.message ||
+          t('Failed to load price locks'),
+      );
     } finally {
-      setLocksLoading(false);
+      if (requestId === lockRefreshRequestIdRef.current) {
+        setLocksLoading(false);
+      }
     }
   }, [t]);
 
   useEffect(() => {
     refreshLocks();
+    return () => {
+      lockRefreshRequestIdRef.current += 1;
+    };
   }, [refreshLocks]);
+
+  const lockOperationPending =
+    Boolean(pendingLockModel) || pendingBatchLock !== null;
 
   const handleLockChange = useCallback(
     async (modelName, locked, showResult = true) => {
-      if (!locksReady || pendingLockModel) return false;
+      if (!locksReadyRef.current || lockOperationPendingRef.current) {
+        return false;
+      }
       if (locked && isDirty) {
         showError(t('Save price changes before locking'));
         return false;
       }
 
+      lockOperationPendingRef.current = true;
       setPendingLockModel(modelName);
       try {
         const response = await API.put(
@@ -206,25 +239,89 @@ export default function ModelPricingEditor({
         return true;
       } catch (error) {
         console.error(error);
-        showError(t('Failed to update price lock'));
+        showError(
+          error?.response?.data?.message ||
+            error?.message ||
+            t('Failed to update price lock'),
+        );
         return false;
       } finally {
+        lockOperationPendingRef.current = false;
         setPendingLockModel('');
       }
     },
-    [isDirty, locksReady, pendingLockModel, t],
+    [isDirty, t],
   );
 
   const handleDeleteModel = useCallback(
     async (modelName) => {
-      if (!locksReady || pendingLockModel) return;
+      if (!locksReadyRef.current || lockOperationPendingRef.current) return;
       if (lockedModels.includes(modelName)) {
         const unlocked = await handleLockChange(modelName, false, false);
         if (!unlocked) return;
       }
       deleteModel(modelName);
     },
-    [deleteModel, handleLockChange, lockedModels, locksReady, pendingLockModel],
+    [deleteModel, handleLockChange, lockedModels],
+  );
+
+  const handleBatchLockChange = useCallback(
+    async (locked) => {
+      if (
+        selectedModelNames.length === 0 ||
+        !locksReadyRef.current ||
+        lockOperationPendingRef.current
+      ) {
+        return;
+      }
+      if (locked && isDirty) {
+        showError(t('Save price changes before locking'));
+        return;
+      }
+
+      lockOperationPendingRef.current = true;
+      setPendingBatchLock(locked);
+      try {
+        const response = await API.put(
+          '/api/ratio_sync/locks',
+          {
+            model_names: selectedModelNames,
+            locked,
+          },
+          { skipErrorHandler: true },
+        );
+        if (!response?.data?.success) {
+          throw new Error(
+            response?.data?.message || t('Failed to update price lock'),
+          );
+        }
+        setLockedModels(response.data.data?.locked_models || []);
+        const changed = response.data.data?.changed_models?.length || 0;
+        showSuccess(
+          locked
+            ? t('Locked {{changed}} of {{total}} selected model prices', {
+                changed,
+                total: selectedModelNames.length,
+              })
+            : t('Unlocked {{changed}} of {{total}} selected model prices', {
+                changed,
+                total: selectedModelNames.length,
+              }),
+        );
+        setSelectedModelNames([]);
+      } catch (error) {
+        console.error(error);
+        showError(
+          error?.response?.data?.message ||
+            error?.message ||
+            t('Failed to update price lock'),
+        );
+      } finally {
+        lockOperationPendingRef.current = false;
+        setPendingBatchLock(null);
+      }
+    },
+    [isDirty, selectedModelNames, setSelectedModelNames, t],
   );
 
   const getExprModeLabel = useCallback(
@@ -331,7 +428,7 @@ export default function ModelPricingEditor({
                     aria-label={tooltip}
                     disabled={
                       !locksReady ||
-                      Boolean(pendingLockModel) ||
+                      lockOperationPending ||
                       (!locked && isDirty)
                     }
                     icon={
@@ -352,7 +449,7 @@ export default function ModelPricingEditor({
                   size='small'
                   type='danger'
                   icon={<IconDelete />}
-                  disabled={!locksReady || Boolean(pendingLockModel)}
+                  disabled={!locksReady || lockOperationPending}
                   onClick={() => handleDeleteModel(record.name)}
                 />
               ) : null}
@@ -369,6 +466,7 @@ export default function ModelPricingEditor({
       lockedModels,
       locksLoading,
       locksReady,
+      lockOperationPending,
       pendingLockModel,
       getExprModeLabel,
       selectedModelName,
@@ -386,6 +484,9 @@ export default function ModelPricingEditor({
   };
 
   const rowSelection = {
+    getCheckboxProps: () => ({
+      disabled: lockOperationPending,
+    }),
     selectedRowKeys: selectedModelNames,
     onChange: (selectedRowKeys) => setSelectedModelNames(selectedRowKeys),
   };
@@ -421,6 +522,35 @@ export default function ModelPricingEditor({
             {selectedModelNames.length > 0
               ? ` (${selectedModelNames.length})`
               : ''}
+          </Button>
+          <Button
+            icon={<Power size={16} />}
+            loading={pendingBatchLock === true}
+            disabled={
+              selectedModelNames.length === 0 ||
+              !locksReady ||
+              lockOperationPending ||
+              isDirty
+            }
+            onClick={() => handleBatchLockChange(true)}
+            aria-label={t('Lock selected prices')}
+            style={isMobile ? { width: '100%' } : undefined}
+          >
+            {t('Lock selected prices')}
+          </Button>
+          <Button
+            icon={<PowerOff size={16} />}
+            loading={pendingBatchLock === false}
+            disabled={
+              selectedModelNames.length === 0 ||
+              !locksReady ||
+              lockOperationPending
+            }
+            onClick={() => handleBatchLockChange(false)}
+            aria-label={t('Unlock selected prices')}
+            style={isMobile ? { width: '100%' } : undefined}
+          >
+            {t('Unlock selected prices')}
           </Button>
           <Input
             prefix={<IconSearch />}

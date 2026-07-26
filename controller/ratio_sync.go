@@ -576,6 +576,11 @@ type modelPricingLockRequest struct {
 	Locked    *bool  `json:"locked"`
 }
 
+type modelPricingLocksRequest struct {
+	ModelNames []string `json:"model_names"`
+	Locked     *bool    `json:"locked"`
+}
+
 type applyModelPricingSyncRequest struct {
 	Resolutions map[string]map[string]any `json:"resolutions"`
 }
@@ -589,6 +594,30 @@ func validateModelName(modelName string) (string, error) {
 		return "", fmt.Errorf("模型名称过长")
 	}
 	return modelName, nil
+}
+
+func normalizeModelPricingLocksRequest(req modelPricingLocksRequest) ([]string, bool, error) {
+	if req.Locked == nil {
+		return nil, false, fmt.Errorf("缺少锁定状态")
+	}
+	if len(req.ModelNames) == 0 {
+		return nil, false, fmt.Errorf("模型名称列表不能为空")
+	}
+	normalized := make([]string, 0, len(req.ModelNames))
+	seen := make(map[string]struct{}, len(req.ModelNames))
+	for _, rawModelName := range req.ModelNames {
+		modelName, err := validateModelName(rawModelName)
+		if err != nil {
+			return nil, false, err
+		}
+		if _, exists := seen[modelName]; exists {
+			return nil, false, fmt.Errorf("模型名称重复：%s", modelName)
+		}
+		seen[modelName] = struct{}{}
+		normalized = append(normalized, modelName)
+	}
+	sort.Strings(normalized)
+	return normalized, *req.Locked, nil
 }
 
 func normalizePricingSyncResolutions(resolutions map[string]map[string]any) (map[string]map[string]any, error) {
@@ -688,6 +717,41 @@ func UpdateModelPricingLock(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data":    gin.H{"model_name": modelName, "locked": *req.Locked, "locked_models": lockedModels},
+	})
+}
+
+func UpdateModelPricingLocks(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRatioConfigBytes)
+	var req modelPricingLocksRequest
+	if err := common.DecodeJson(c.Request.Body, &req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "请求参数格式错误"})
+		return
+	}
+	modelNames, locked, err := normalizeModelPricingLocksRequest(req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	result, err := model.SetModelPricingLocks(modelNames, locked)
+	if err != nil {
+		logger.LogError(c.Request.Context(), "批量更新模型价格锁失败："+err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "批量更新模型价格锁失败"})
+		return
+	}
+	recordManageAudit(c, "model_pricing.lock_batch", map[string]interface{}{
+		"count":   len(modelNames),
+		"changed": len(result.ChangedModels),
+		"locked":  locked,
+	})
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data": gin.H{
+			"model_names":    modelNames,
+			"changed_models": result.ChangedModels,
+			"locked":         locked,
+			"locked_models":  result.LockedModels,
+		},
 	})
 }
 

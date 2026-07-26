@@ -30,6 +30,7 @@ var auditContentTemplates = map[string]string{
 	"user.reset_passkey":        "Reset the user passkey",
 	"option.update":             "Updated system setting ${key}",
 	"model_pricing.lock_update": "Updated price lock for model ${model} (${locked})",
+	"model_pricing.lock_batch":  "Batch updated price locks for ${changed}/${count} models (${locked})",
 	"model_pricing.sync_apply":  "Applied upstream pricing sync to ${count} models (${ignored} locked models skipped)",
 
 	"channel.create":             "Created channel ${name} (type ${type}, count ${count})",

@@ -234,6 +234,7 @@ func SetApiRouter(router *gin.Engine) {
 			ratioSyncRoute.POST("/fetch", controller.FetchUpstreamRatios)
 			ratioSyncRoute.POST("/apply", controller.ApplyModelPricingSync)
 			ratioSyncRoute.PUT("/lock", controller.UpdateModelPricingLock)
+			ratioSyncRoute.PUT("/locks", controller.UpdateModelPricingLocks)
 		}
 		registerChannelRoutes(apiRouter)
 		registerAuthzRoutes(apiRouter)

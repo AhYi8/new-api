@@ -53,6 +53,7 @@ type BuildModelRatioColumnsOptions = {
   onToggleLock: (name: string, locked: boolean) => void
   lockedModels: ReadonlySet<string>
   pendingLockModel?: string
+  lockPending: boolean
   lockDisabled: boolean
   lockStateUnavailable: boolean
   lockStateLoading: boolean
@@ -66,6 +67,7 @@ export function buildModelRatioColumns({
   onToggleLock,
   lockedModels,
   pendingLockModel,
+  lockPending,
   lockDisabled,
   lockStateUnavailable,
   lockStateLoading,
@@ -173,11 +175,11 @@ export function buildModelRatioColumns({
         const disabled = isPriceLockActionDisabled(
           locked,
           lockDisabled,
-          Boolean(pendingLockModel),
+          lockPending,
           lockStateUnavailable
         )
         let tooltip = label
-        if (lockStateLoading) tooltip = t('Loading...')
+        if (lockStateLoading || lockPending) tooltip = t('Loading...')
         else if (lockStateUnavailable) {
           tooltip = t('Failed to load price locks')
         } else if (!locked && lockDisabled) {
@@ -217,9 +219,7 @@ export function buildModelRatioColumns({
               onEdit={() => onEdit(row.original)}
               onDelete={() => onDelete(row.original.name)}
               deleteDisabled={
-                deleteDisabled ||
-                lockStateUnavailable ||
-                Boolean(pendingLockModel)
+                deleteDisabled || lockStateUnavailable || lockPending
               }
             />
           </div>

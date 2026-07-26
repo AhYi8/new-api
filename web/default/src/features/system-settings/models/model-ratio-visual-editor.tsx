@@ -1,4 +1,3 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -17,6 +16,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { PowerIcon, PowerOffIcon } from '@hugeicons/core-free-icons'
+import { HugeiconsIcon } from '@hugeicons/react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type {
   ColumnFiltersState,
   OnChangeFn,
@@ -48,10 +50,20 @@ import {
   useDataTable,
 } from '@/components/data-table'
 import { Button } from '@/components/ui/button'
+import { Spinner } from '@/components/ui/spinner'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { combineBillingExpr } from '@/features/pricing/lib/billing-expr'
 import { useMediaQuery } from '@/hooks'
 
-import { getModelPricingLocks, updateModelPricingLock } from '../api'
+import {
+  getModelPricingLocks,
+  updateModelPricingLock,
+  updateModelPricingLocks,
+} from '../api'
 import { safeJsonParse } from '../utils/json-parser'
 import type { PricingMode } from './model-pricing-core'
 import { normalizeLockedModels } from './model-pricing-locks'
@@ -103,6 +115,7 @@ export type ModelRatioVisualEditorHandle = {
 }
 
 const STORAGE_KEY = 'model-ratio-column-visibility'
+const MODEL_PRICING_LOCKS_QUERY_KEY = ['model-pricing-locks'] as const
 
 const ModelRatioVisualEditorComponent = forwardRef<
   ModelRatioVisualEditorHandle,
@@ -146,13 +159,15 @@ const ModelRatioVisualEditorComponent = forwardRef<
   const [editData, setEditData] = useState<ModelRatioData | null>(null)
   const [editorDirty, setEditorDirty] = useState(false)
   const [pendingLockModel, setPendingLockModel] = useState<string>()
+  const [pendingBatchLock, setPendingBatchLock] = useState<boolean>()
   const [sorting, setSorting] = useState<SortingState>([])
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
   const [globalFilter, setGlobalFilter] = useState('')
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
   const editorPanelRef = useRef<ModelPricingEditorPanelHandle>(null)
+  const lockOperationInFlightRef = useRef(false)
   const locksQuery = useQuery({
-    queryKey: ['model-pricing-locks'],
+    queryKey: MODEL_PRICING_LOCKS_QUERY_KEY,
     queryFn: getModelPricingLocks,
   })
   const lockedModels = useMemo(
@@ -455,14 +470,17 @@ const ModelRatioVisualEditorComponent = forwardRef<
 
   const hasUnsavedPricingChanges =
     editorDirty || models.some((model) => model.isDraftChanged)
+  const lockOperationPending =
+    pendingLockModel !== undefined || pendingBatchLock !== undefined
 
   const handleToggleLock = useCallback(
     async (name: string, locked: boolean) => {
-      if (lockStateUnavailable || pendingLockModel) return
+      if (lockStateUnavailable || lockOperationInFlightRef.current) return
       if (locked && hasUnsavedPricingChanges) {
         toast.warning(t('Save price changes before locking'))
         return
       }
+      lockOperationInFlightRef.current = true
       setPendingLockModel(name)
       try {
         const response = await updateModelPricingLock({
@@ -472,8 +490,13 @@ const ModelRatioVisualEditorComponent = forwardRef<
         if (!response.success) {
           throw new Error(response.message || t('Failed to update price lock'))
         }
-        queryClient.setQueryData(['model-pricing-locks'], response)
-        queryClient.invalidateQueries({ queryKey: ['model-pricing-locks'] })
+        await queryClient.cancelQueries({
+          queryKey: MODEL_PRICING_LOCKS_QUERY_KEY,
+        })
+        queryClient.setQueryData(MODEL_PRICING_LOCKS_QUERY_KEY, response)
+        queryClient.invalidateQueries({
+          queryKey: MODEL_PRICING_LOCKS_QUERY_KEY,
+        })
         toast.success(
           locked
             ? t('Price locked successfully')
@@ -486,22 +509,18 @@ const ModelRatioVisualEditorComponent = forwardRef<
             : t('Failed to update price lock')
         )
       } finally {
+        lockOperationInFlightRef.current = false
         setPendingLockModel(undefined)
       }
     },
-    [
-      hasUnsavedPricingChanges,
-      lockStateUnavailable,
-      pendingLockModel,
-      queryClient,
-      t,
-    ]
+    [hasUnsavedPricingChanges, lockStateUnavailable, queryClient, t]
   )
 
   const handleDelete = useCallback(
     async (name: string) => {
-      if (lockStateUnavailable || pendingLockModel) return
+      if (lockStateUnavailable || lockOperationInFlightRef.current) return
       if (lockedModels.has(name)) {
+        lockOperationInFlightRef.current = true
         setPendingLockModel(name)
         try {
           const response = await updateModelPricingLock({
@@ -511,27 +530,26 @@ const ModelRatioVisualEditorComponent = forwardRef<
           if (!response.success) {
             throw new Error(response.message || t('Failed to unlock price'))
           }
-          queryClient.setQueryData(['model-pricing-locks'], response)
-          queryClient.invalidateQueries({ queryKey: ['model-pricing-locks'] })
+          await queryClient.cancelQueries({
+            queryKey: MODEL_PRICING_LOCKS_QUERY_KEY,
+          })
+          queryClient.setQueryData(MODEL_PRICING_LOCKS_QUERY_KEY, response)
+          queryClient.invalidateQueries({
+            queryKey: MODEL_PRICING_LOCKS_QUERY_KEY,
+          })
         } catch (error) {
           toast.error(
             error instanceof Error ? error.message : t('Failed to unlock price')
           )
-          setPendingLockModel(undefined)
           return
+        } finally {
+          lockOperationInFlightRef.current = false
+          setPendingLockModel(undefined)
         }
-        setPendingLockModel(undefined)
       }
       removeModel(name)
     },
-    [
-      lockedModels,
-      lockStateUnavailable,
-      pendingLockModel,
-      queryClient,
-      removeModel,
-      t,
-    ]
+    [lockedModels, lockStateUnavailable, queryClient, removeModel, t]
   )
 
   const columns = useMemo(
@@ -542,6 +560,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
         onToggleLock: handleToggleLock,
         lockedModels,
         pendingLockModel,
+        lockPending: lockOperationPending,
         lockDisabled: hasUnsavedPricingChanges,
         lockStateUnavailable,
         lockStateLoading: locksQuery.isPending,
@@ -555,6 +574,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
       hasUnsavedPricingChanges,
       lockedModels,
       pendingLockModel,
+      lockOperationPending,
       lockStateUnavailable,
       locksQuery.isPending,
       filterMode,
@@ -766,6 +786,70 @@ const ModelRatioVisualEditorComponent = forwardRef<
     )
   }, [editData, editorOpen, persistPricingData, t, table])
 
+  const handleBatchLockChange = useCallback(
+    async (locked: boolean) => {
+      if (lockStateUnavailable || lockOperationInFlightRef.current) return
+      if (locked && hasUnsavedPricingChanges) {
+        toast.warning(t('Save price changes before locking'))
+        return
+      }
+
+      const modelNames = table
+        .getFilteredSelectedRowModel()
+        .rows.map((row) => row.original.name)
+      if (modelNames.length === 0) return
+
+      lockOperationInFlightRef.current = true
+      setPendingBatchLock(locked)
+      try {
+        const response = await updateModelPricingLocks({
+          model_names: modelNames,
+          locked,
+        })
+        await queryClient.cancelQueries({
+          queryKey: MODEL_PRICING_LOCKS_QUERY_KEY,
+        })
+        queryClient.setQueryData(MODEL_PRICING_LOCKS_QUERY_KEY, response)
+        queryClient.invalidateQueries({
+          queryKey: MODEL_PRICING_LOCKS_QUERY_KEY,
+        })
+        const message = locked
+          ? t('Locked {{changed}} of {{total}} selected model prices', {
+              changed: response.data.changed_models.length,
+              total: modelNames.length,
+            })
+          : t('Unlocked {{changed}} of {{total}} selected model prices', {
+              changed: response.data.changed_models.length,
+              total: modelNames.length,
+            })
+        toast.success(message)
+        table.resetRowSelection()
+      } catch (error) {
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : t('Failed to update price lock')
+        )
+      } finally {
+        lockOperationInFlightRef.current = false
+        setPendingBatchLock(undefined)
+      }
+    },
+    [hasUnsavedPricingChanges, lockStateUnavailable, queryClient, t, table]
+  )
+
+  let batchLockTooltip = t('Lock selected prices')
+  let batchUnlockTooltip = t('Unlock selected prices')
+  if (locksQuery.isPending || lockOperationPending) {
+    batchLockTooltip = t('Loading...')
+    batchUnlockTooltip = t('Loading...')
+  } else if (locksQuery.isError) {
+    batchLockTooltip = t('Failed to load price locks')
+    batchUnlockTooltip = t('Failed to load price locks')
+  } else if (hasUnsavedPricingChanges) {
+    batchLockTooltip = t('Save price changes before locking')
+  }
+
   useImperativeHandle(
     ref,
     () => ({
@@ -927,6 +1011,66 @@ const ModelRatioVisualEditorComponent = forwardRef<
       </div>
 
       <DataTableBulkActions table={table} entityName={t('model')}>
+        <Tooltip>
+          <TooltipTrigger render={<span className='inline-flex' />}>
+            <Button
+              variant='outline'
+              size='sm'
+              disabled={
+                lockStateUnavailable ||
+                lockOperationPending ||
+                hasUnsavedPricingChanges
+              }
+              onClick={() => handleBatchLockChange(true)}
+              title={batchLockTooltip}
+              aria-label={t('Lock selected prices')}
+              aria-busy={pendingBatchLock === true}
+            >
+              {pendingBatchLock === true ? (
+                <Spinner data-icon='inline-start' aria-hidden='true' />
+              ) : (
+                <HugeiconsIcon
+                  icon={PowerIcon}
+                  strokeWidth={2}
+                  data-icon='inline-start'
+                  aria-hidden='true'
+                />
+              )}
+              <span className='hidden sm:inline'>
+                {t('Lock selected prices')}
+              </span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{batchLockTooltip}</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger render={<span className='inline-flex' />}>
+            <Button
+              variant='outline'
+              size='sm'
+              disabled={lockStateUnavailable || lockOperationPending}
+              onClick={() => handleBatchLockChange(false)}
+              title={batchUnlockTooltip}
+              aria-label={t('Unlock selected prices')}
+              aria-busy={pendingBatchLock === false}
+            >
+              {pendingBatchLock === false ? (
+                <Spinner data-icon='inline-start' aria-hidden='true' />
+              ) : (
+                <HugeiconsIcon
+                  icon={PowerOffIcon}
+                  strokeWidth={2}
+                  data-icon='inline-start'
+                  aria-hidden='true'
+                />
+              )}
+              <span className='hidden sm:inline'>
+                {t('Unlock selected prices')}
+              </span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{batchUnlockTooltip}</TooltipContent>
+        </Tooltip>
         <Button size='sm' disabled={!editData} onClick={handleBatchCopy}>
           <Copy data-icon='inline-start' />
           {editData

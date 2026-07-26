@@ -56,6 +56,11 @@ type ModelPricingSyncResult struct {
 	IgnoredLockedModels []string
 }
 
+type ModelPricingLockUpdateResult struct {
+	LockedModels  []string
+	ChangedModels []string
+}
+
 func parseModelPricingLocks(value string) (map[string]bool, error) {
 	locks := make(map[string]bool)
 	if value == "" {
@@ -127,9 +132,20 @@ func GetModelPricingLocks() (map[string]bool, error) {
 }
 
 func SetModelPricingLock(modelName string, locked bool) ([]string, error) {
+	result, err := SetModelPricingLocks([]string{modelName}, locked)
+	if err != nil {
+		return nil, err
+	}
+	return result.LockedModels, nil
+}
+
+// SetModelPricingLocks 在同一事务中更新整批锁，避免逐条请求产生部分成功或缓存交错。
+func SetModelPricingLocks(modelNames []string, locked bool) (ModelPricingLockUpdateResult, error) {
 	modelPricingMutationMutex.Lock()
 	defer modelPricingMutationMutex.Unlock()
 	var serialized string
+	var lockedModels []string
+	changedModels := make([]string, 0, len(modelNames))
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		if err := ensureOptionRows(tx, []string{ModelPricingLocksOptionKey}); err != nil {
 			return err
@@ -142,10 +158,25 @@ func SetModelPricingLock(modelName string, locked bool) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if locked {
-			locks[modelName] = true
-		} else {
+		for _, modelName := range modelNames {
+			if locked {
+				if locks[modelName] {
+					continue
+				}
+				locks[modelName] = true
+				changedModels = append(changedModels, modelName)
+				continue
+			}
+			if !locks[modelName] {
+				continue
+			}
 			delete(locks, modelName)
+			changedModels = append(changedModels, modelName)
+		}
+		lockedModels = sortedLockedModelNames(locks)
+		if len(changedModels) == 0 {
+			serialized = option.Value
+			return nil
 		}
 		serialized, err = marshalModelPricingLocks(locks)
 		if err != nil {
@@ -155,16 +186,16 @@ func SetModelPricingLock(modelName string, locked bool) ([]string, error) {
 		return tx.Save(&option).Error
 	})
 	if err != nil {
-		return nil, err
+		return ModelPricingLockUpdateResult{}, err
 	}
 	if err := updateOptionMap(ModelPricingLocksOptionKey, serialized); err != nil {
-		return nil, err
+		return ModelPricingLockUpdateResult{}, err
 	}
-	locks, err := parseModelPricingLocks(serialized)
-	if err != nil {
-		return nil, err
-	}
-	return sortedLockedModelNames(locks), nil
+	sort.Strings(changedModels)
+	return ModelPricingLockUpdateResult{
+		LockedModels:  lockedModels,
+		ChangedModels: changedModels,
+	}, nil
 }
 
 func parsePricingOptionValue(value string) (map[string]any, error) {

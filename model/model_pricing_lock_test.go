@@ -111,6 +111,28 @@ func TestModelPricingLockPersistsAndUnlocks(t *testing.T) {
 	assert.Empty(t, locks)
 }
 
+func TestModelPricingLocksBatchUpdatesOnlyChangedModels(t *testing.T) {
+	setupModelPricingLockTest(t)
+
+	_, err := SetModelPricingLock("locked-existing", true)
+	require.NoError(t, err)
+
+	result, err := SetModelPricingLocks([]string{"model-b", "locked-existing", "model-a"}, true)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"model-a", "model-b"}, result.ChangedModels)
+	assert.Equal(t, []string{"locked-existing", "model-a", "model-b"}, result.LockedModels)
+
+	result, err = SetModelPricingLocks([]string{"model-b", "locked-existing", "model-a"}, true)
+	require.NoError(t, err)
+	assert.Empty(t, result.ChangedModels)
+	assert.Equal(t, []string{"locked-existing", "model-a", "model-b"}, result.LockedModels)
+
+	result, err = SetModelPricingLocks([]string{"missing", "model-b", "locked-existing"}, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"locked-existing", "model-b"}, result.ChangedModels)
+	assert.Equal(t, []string{"model-a"}, result.LockedModels)
+}
+
 func TestApplyModelPricingSyncSkipsLockedModelAndSwitchesUnlockedCategory(t *testing.T) {
 	setupModelPricingLockTest(t)
 

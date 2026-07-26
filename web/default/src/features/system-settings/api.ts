@@ -42,6 +42,8 @@ import type {
   UpstreamRatiosResponse,
   UpdateModelPricingLockRequest,
   UpdateModelPricingLockResponse,
+  UpdateModelPricingLocksRequest,
+  UpdateModelPricingLocksResponse,
 } from './types'
 
 export async function getSystemOptions() {
@@ -202,6 +204,21 @@ export async function updateModelPricingLock(
 ) {
   const res = await api.put<UpdateModelPricingLockResponse>(
     '/api/ratio_sync/lock',
+    request
+  )
+  if (!res.data.success) {
+    throw new Error(
+      res.data.message || i18next.t('Failed to update price lock')
+    )
+  }
+  return res.data
+}
+
+export async function updateModelPricingLocks(
+  request: UpdateModelPricingLocksRequest
+) {
+  const res = await api.put<UpdateModelPricingLocksResponse>(
+    '/api/ratio_sync/locks',
     request
   )
   if (!res.data.success) {

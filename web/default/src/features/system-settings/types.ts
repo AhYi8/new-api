@@ -553,6 +553,22 @@ export type UpdateModelPricingLockResponse = {
   }
 }
 
+export type UpdateModelPricingLocksRequest = {
+  model_names: string[]
+  locked: boolean
+}
+
+export type UpdateModelPricingLocksResponse = {
+  success: boolean
+  message: string
+  data: {
+    model_names: string[]
+    changed_models: string[]
+    locked: boolean
+    locked_models: string[]
+  }
+}
+
 export type ApplyModelPricingSyncRequest = {
   resolutions: Record<string, Partial<Record<RatioType, number | string>>>
 }
