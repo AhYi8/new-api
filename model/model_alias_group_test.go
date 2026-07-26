@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,20 +34,45 @@ func setupModelAliasGroupTest(t *testing.T) {
 
 	common.OptionMapRWMutex.Lock()
 	oldOptionMap := common.OptionMap
-	common.OptionMap = map[string]string{
+	testOptionMap := map[string]string{
 		ModelAliasGroupsOptionKey:        "[]",
 		ModelAliasScanEnabledOptionKey:   "true",
 		ModelAliasScanIntervalOptionKey:  "30",
 		ModelAliasPendingCountsOptionKey: "{}",
 		modelAliasScanRevisionOptionKey:  "",
+		ModelPricingLocksOptionKey:       "{}",
+		"ModelPrice":                     "{}",
+		"ModelRatio":                     `{"alias":1,"alias-a":1,"alias-b":1,"deepseek-v4-pro":1}`,
+		"CompletionRatio":                "{}",
+		"CacheRatio":                     "{}",
+		"CreateCacheRatio":               "{}",
+		"ImageRatio":                     "{}",
+		"AudioRatio":                     "{}",
+		"AudioCompletionRatio":           "{}",
+		"billing_setting.billing_mode":   "{}",
+		"billing_setting.billing_expr":   "{}",
 	}
+	common.OptionMap = testOptionMap
 	common.OptionMapRWMutex.Unlock()
+	testPricingOptions := make(map[string]string, len(modelPricingSyncOptionKeys))
+	for _, key := range modelPricingSyncOptionKeys {
+		testPricingOptions[key] = testOptionMap[key]
+	}
+	require.NoError(t, publishModelPricingOptions(testPricingOptions))
 
 	t.Cleanup(func() {
 		DB = oldDB
 		common.MemoryCacheEnabled = oldMemoryCacheEnabled
 		common.SetDatabaseTypes(oldMainDatabaseType, oldLogDatabaseType)
 		initCol()
+		restoredPricingOptions := make(map[string]string, len(modelPricingSyncOptionKeys))
+		for _, key := range modelPricingSyncOptionKeys {
+			restoredPricingOptions[key] = oldOptionMap[key]
+			if restoredPricingOptions[key] == "" {
+				restoredPricingOptions[key] = "{}"
+			}
+		}
+		require.NoError(t, publishModelPricingOptions(restoredPricingOptions))
 		common.OptionMapRWMutex.Lock()
 		common.OptionMap = oldOptionMap
 		common.OptionMapRWMutex.Unlock()
@@ -516,6 +543,435 @@ func TestModelAliasScanRevisionChangesOnEverySave(t *testing.T) {
 	_, err = SaveModelAliasConfiguration(groups, false, 45)
 	require.NoError(t, err)
 	assert.False(t, summary.IsCurrent())
+}
+
+func TestSaveModelAliasConfigurationCopiesAllPricingModesAndLocksModels(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	setModelAliasPricingOptions(t, map[string]string{
+		"ModelPrice":                   `{"per-call-main":0,"per-call-target":9,"expr-main":1.25,"expr-target":9}`,
+		"ModelRatio":                   `{"ratio-main":0,"ratio-target":9,"per-call-target":9,"expr-main":2,"expr-target":9}`,
+		"CompletionRatio":              `{"ratio-main":3,"ratio-target":9,"per-call-target":9,"expr-main":4,"expr-target":9}`,
+		"CacheRatio":                   `{"ratio-main":0,"ratio-target":9,"per-call-target":9,"expr-main":0.1,"expr-target":9}`,
+		"CreateCacheRatio":             `{"ratio-main":5,"ratio-target":9,"per-call-target":9,"expr-main":0,"expr-target":9}`,
+		"ImageRatio":                   `{"ratio-main":6,"ratio-target":9,"per-call-target":9,"expr-main":0.2,"expr-target":9}`,
+		"AudioRatio":                   `{"ratio-main":7,"ratio-target":9,"per-call-target":9,"expr-main":0.3,"expr-target":9}`,
+		"AudioCompletionRatio":         `{"ratio-main":8,"ratio-target":9,"per-call-target":9,"expr-main":0.4,"expr-target":9}`,
+		"billing_setting.billing_mode": `{"per-call-target":"tiered_expr","ratio-target":"tiered_expr","expr-main":"tiered_expr","expr-target":"tiered_expr"}`,
+		"billing_setting.billing_expr": `{"per-call-target":"p * 9","ratio-target":"p * 9","expr-main":"p * 2 + c * 3","expr-target":"p * 9"}`,
+	})
+
+	_, err := SaveModelAliasConfiguration([]ModelAliasGroup{
+		{Alias: "per-call-main", Models: []string{"per-call-target"}},
+		{Alias: "ratio-main", Models: []string{"ratio-target"}},
+		{Alias: "expr-main", Models: []string{"expr-target"}},
+	}, true, 30)
+	require.NoError(t, err)
+
+	assert.Equal(t, float64(0), getModelAliasPricingValue(t, "ModelPrice", "per-call-target"))
+	for _, key := range append(modelPricingRatioOptionKeys, "billing_setting.billing_mode", "billing_setting.billing_expr") {
+		assertModelAliasPricingMissing(t, key, "per-call-target")
+	}
+
+	ratioExpected := map[string]float64{
+		"ModelRatio": 0, "CompletionRatio": 3, "CacheRatio": 0, "CreateCacheRatio": 5,
+		"ImageRatio": 6, "AudioRatio": 7, "AudioCompletionRatio": 8,
+	}
+	for key, expected := range ratioExpected {
+		assert.Equal(t, expected, getModelAliasPricingValue(t, key, "ratio-target"), key)
+	}
+	assertModelAliasPricingMissing(t, "ModelPrice", "ratio-target")
+	assertModelAliasPricingMissing(t, "billing_setting.billing_mode", "ratio-target")
+	assertModelAliasPricingMissing(t, "billing_setting.billing_expr", "ratio-target")
+
+	exprExpected := map[string]any{
+		"ModelPrice": 1.25, "ModelRatio": float64(2), "CompletionRatio": float64(4),
+		"CacheRatio": 0.1, "CreateCacheRatio": float64(0), "ImageRatio": 0.2,
+		"AudioRatio": 0.3, "AudioCompletionRatio": 0.4,
+		"billing_setting.billing_mode": "tiered_expr",
+		"billing_setting.billing_expr": "p * 2 + c * 3",
+	}
+	for key, expected := range exprExpected {
+		assert.Equal(t, expected, getModelAliasPricingValue(t, key, "expr-target"), key)
+	}
+	for _, key := range modelPricingSyncOptionKeys {
+		assert.Equal(t, readDatabaseOptionValue(t, key), readMemoryOptionValue(key), key)
+	}
+	price, exists := ratio_setting.GetModelPrice("per-call-target", false)
+	assert.True(t, exists)
+	assert.Equal(t, float64(0), price)
+	ratio, exists, _ := ratio_setting.GetModelRatio("ratio-target")
+	assert.True(t, exists)
+	assert.Equal(t, float64(0), ratio)
+	assert.Equal(t, float64(3), ratio_setting.GetCompletionRatio("ratio-target"))
+	cacheRatio, exists := ratio_setting.GetCacheRatio("ratio-target")
+	assert.True(t, exists)
+	assert.Equal(t, float64(0), cacheRatio)
+	createCacheRatio, exists := ratio_setting.GetCreateCacheRatio("ratio-target")
+	assert.True(t, exists)
+	assert.Equal(t, float64(5), createCacheRatio)
+	imageRatio, exists := ratio_setting.GetImageRatio("ratio-target")
+	assert.True(t, exists)
+	assert.Equal(t, float64(6), imageRatio)
+	assert.Equal(t, float64(7), ratio_setting.GetAudioRatio("ratio-target"))
+	assert.Equal(t, float64(8), ratio_setting.GetAudioCompletionRatio("ratio-target"))
+	assert.Equal(t, billing_setting.BillingModeTieredExpr, billing_setting.GetBillingMode("expr-target"))
+	expr, exists := billing_setting.GetBillingExpr("expr-target")
+	assert.True(t, exists)
+	assert.Equal(t, "p * 2 + c * 3", expr)
+
+	locks, err := GetModelPricingLocks()
+	require.NoError(t, err)
+	for _, modelName := range []string{"per-call-main", "per-call-target", "ratio-main", "ratio-target", "expr-main", "expr-target"} {
+		assert.True(t, locks[modelName], modelName)
+	}
+
+	applyResult, err := ApplyModelPricingSync(map[string]map[string]any{
+		"per-call-main":   {"model_price": 99.0},
+		"per-call-target": {"model_price": 99.0},
+		"unlocked-model":  {"model_price": 5.0},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"unlocked-model"}, applyResult.AppliedModels)
+	assert.Equal(t, []string{"per-call-main", "per-call-target"}, applyResult.IgnoredLockedModels)
+}
+
+func TestSaveModelAliasConfigurationRollsBackWhenMainModelHasNoPrice(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	setModelAliasPricingOptions(t, map[string]string{"ModelPrice": `{"existing-main":1}`})
+	groups := []ModelAliasGroup{{Alias: "existing-main", Models: []string{"existing-target"}}}
+	_, err := SaveModelAliasConfiguration(groups, true, 30)
+	require.NoError(t, err)
+	before := readModelAliasOptionValues(t)
+
+	_, err = SaveModelAliasConfiguration(append(groups, ModelAliasGroup{
+		Alias: "missing-main", Models: []string{"missing-target"},
+	}), false, 45)
+	require.ErrorContains(t, err, "缺少明确的按次价格、按量倍率或完整表达式配置")
+	assert.Equal(t, before, readModelAliasOptionValues(t))
+
+	configuration, err := GetModelAliasConfiguration()
+	require.NoError(t, err)
+	assert.Equal(t, groups, configuration.Groups)
+	locks, err := GetModelPricingLocks()
+	require.NoError(t, err)
+	assert.False(t, locks["missing-main"])
+	assert.False(t, locks["missing-target"])
+}
+
+func TestSaveModelAliasConfigurationRejectsIncompleteExpressionsWithFallbackPrice(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		expr string
+	}{
+		{name: "缺少表达式", expr: `{}`},
+		{name: "空白表达式", expr: `{"expr-main":"  "}`},
+		{name: "无效表达式", expr: `{"expr-main":"p *"}`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			setupModelAliasGroupTest(t)
+			setModelAliasPricingOptions(t, map[string]string{
+				"ModelPrice":                   `{"expr-main":1}`,
+				"ModelRatio":                   `{"expr-main":2}`,
+				"billing_setting.billing_mode": `{"expr-main":"tiered_expr"}`,
+				"billing_setting.billing_expr": testCase.expr,
+			})
+			before := readModelAliasOptionValues(t)
+			beforeMemory := readModelAliasMemoryOptionValues()
+
+			_, err := SaveModelAliasConfiguration([]ModelAliasGroup{
+				{Alias: "expr-main", Models: []string{"expr-target"}},
+			}, true, 30)
+			require.Error(t, err)
+			assert.Equal(t, before, readModelAliasOptionValues(t))
+			assert.Equal(t, beforeMemory, readModelAliasMemoryOptionValues())
+			_, hasPrice := ratio_setting.GetModelPrice("expr-target", false)
+			assert.False(t, hasPrice)
+			_, hasRatio, _ := ratio_setting.GetModelRatio("expr-target")
+			assert.False(t, hasRatio)
+			assert.Equal(t, billing_setting.BillingModeRatio, billing_setting.GetBillingMode("expr-target"))
+			_, hasExpr := billing_setting.GetBillingExpr("expr-target")
+			assert.False(t, hasExpr)
+			locks, lockErr := GetModelPricingLocks()
+			require.NoError(t, lockErr)
+			assert.False(t, locks["expr-target"])
+		})
+	}
+}
+
+func TestModelAliasScanRefreshesPricesRelocksAndSkipsInvalidGroups(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	setModelAliasPricingOptions(t, map[string]string{
+		"ModelPrice": `{"sync-main":1,"skip-main":3}`,
+	})
+	groups := []ModelAliasGroup{
+		{Alias: "sync-main", Models: []string{"sync-target"}},
+		{Alias: "skip-main", Models: []string{"skip-target"}},
+	}
+	_, err := SaveModelAliasConfiguration(groups, true, 30)
+	require.NoError(t, err)
+
+	require.NoError(t, UpdateOption("ModelPrice", `{"sync-main":2,"sync-target":1,"skip-target":3}`))
+	require.NoError(t, UpdateOption(ModelPricingLocksOptionKey, `{}`))
+
+	summary, err := ScanModelAliasPendingCounts(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, summary.SyncedGroups)
+	assert.Equal(t, 1, summary.SyncedModels)
+	require.Len(t, summary.SkippedGroups, 1)
+	assert.Equal(t, "skip-main", summary.SkippedGroups[0].Alias)
+	assert.Contains(t, summary.SkippedGroups[0].Reason, "缺少明确")
+	assert.Equal(t, float64(2), getModelAliasPricingValue(t, "ModelPrice", "sync-target"))
+	assert.Equal(t, float64(3), getModelAliasPricingValue(t, "ModelPrice", "skip-target"))
+
+	locks, err := GetModelPricingLocks()
+	require.NoError(t, err)
+	for _, modelName := range []string{"sync-main", "sync-target", "skip-main", "skip-target"} {
+		assert.True(t, locks[modelName], modelName)
+	}
+}
+
+func TestRemovingModelsOrGroupsKeepsCopiedPricesAndLocks(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	setModelAliasPricingOptions(t, map[string]string{"ModelPrice": `{"preserve-main":4}`})
+	_, err := SaveModelAliasConfiguration([]ModelAliasGroup{
+		{Alias: "preserve-main", Models: []string{"preserve-a", "preserve-b"}},
+	}, true, 30)
+	require.NoError(t, err)
+	require.NoError(t, UpdateOption("ModelPrice", `{"preserve-main":9,"preserve-a":4,"preserve-b":4}`))
+
+	_, err = SaveModelAliasConfiguration([]ModelAliasGroup{
+		{Alias: "preserve-main", Models: []string{"preserve-a"}},
+	}, true, 30)
+	require.NoError(t, err)
+	assert.Equal(t, float64(4), getModelAliasPricingValue(t, "ModelPrice", "preserve-b"))
+	locks, err := GetModelPricingLocks()
+	require.NoError(t, err)
+	assert.True(t, locks["preserve-b"])
+	require.NoError(t, UpdateOption("ModelPrice", `{"preserve-main":12,"preserve-a":9,"preserve-b":4}`))
+
+	_, err = SaveModelAliasConfiguration(nil, true, 30)
+	require.NoError(t, err)
+	assert.Equal(t, float64(9), getModelAliasPricingValue(t, "ModelPrice", "preserve-a"))
+	assert.Equal(t, float64(4), getModelAliasPricingValue(t, "ModelPrice", "preserve-b"))
+	locks, err = GetModelPricingLocks()
+	require.NoError(t, err)
+	for _, modelName := range []string{"preserve-main", "preserve-a", "preserve-b"} {
+		assert.True(t, locks[modelName], modelName)
+	}
+}
+
+func TestModelAliasPricingLocksCannotBeRemovedUntilModelLeavesGroup(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	setModelAliasPricingOptions(t, map[string]string{"ModelPrice": `{"lock-main":1}`})
+	_, err := SaveModelAliasConfiguration([]ModelAliasGroup{
+		{Alias: "lock-main", Models: []string{"lock-member", "removed-member"}},
+	}, true, 30)
+	require.NoError(t, err)
+	_, err = SetModelPricingLock("manual-lock", true)
+	require.NoError(t, err)
+
+	result, err := SetModelPricingLocks([]string{"lock-main", "lock-member", "removed-member"}, false)
+	require.NoError(t, err)
+	assert.Empty(t, result.ChangedModels)
+	for _, modelName := range []string{"lock-main", "lock-member", "removed-member", "manual-lock"} {
+		assert.Contains(t, result.LockedModels, modelName)
+	}
+
+	_, err = SaveModelAliasConfiguration([]ModelAliasGroup{
+		{Alias: "lock-main", Models: []string{"lock-member"}},
+	}, true, 30)
+	require.NoError(t, err)
+	result, err = SetModelPricingLocks([]string{"removed-member"}, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"removed-member"}, result.ChangedModels)
+	assert.Contains(t, result.LockedModels, "manual-lock")
+
+	_, err = SaveModelAliasConfiguration(nil, true, 30)
+	require.NoError(t, err)
+	result, err = SetModelPricingLocks([]string{"lock-main", "lock-member"}, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"lock-main", "lock-member"}, result.ChangedModels)
+	assert.Equal(t, []string{"manual-lock"}, result.LockedModels)
+}
+
+func TestScanSettingOnlySaveDoesNotRequireOrCopyMainModelPrice(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	setModelAliasPricingOptions(t, map[string]string{"ModelPrice": `{"settings-main":1}`})
+	groups := []ModelAliasGroup{{Alias: "settings-main", Models: []string{"settings-target"}}}
+	_, err := SaveModelAliasConfiguration(groups, true, 30)
+	require.NoError(t, err)
+	require.NoError(t, UpdateOption("ModelPrice", `{"settings-target":1}`))
+
+	configuration, err := SaveModelAliasConfiguration(groups, false, 45)
+	require.NoError(t, err)
+	assert.False(t, configuration.ScanEnabled)
+	assert.Equal(t, 45, configuration.ScanIntervalMinutes)
+	assert.Equal(t, float64(1), getModelAliasPricingValue(t, "ModelPrice", "settings-target"))
+}
+
+func TestSaveModelAliasConfigurationReportsOnlyNewOrChangedCurrentGroups(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	setModelAliasPricingOptions(t, map[string]string{"ModelPrice": `{"changes-main":1}`})
+	groups := []ModelAliasGroup{{Alias: "changes-main", Models: []string{"vendor/a", "vendor/b"}}}
+	_, changed, err := SaveModelAliasConfigurationWithChanges(groups, true, 30)
+	require.NoError(t, err)
+	assert.True(t, changed)
+
+	_, changed, err = SaveModelAliasConfigurationWithChanges([]ModelAliasGroup{
+		{Alias: "changes-main", Models: []string{"vendor/b", "vendor/a"}},
+	}, false, 45)
+	require.NoError(t, err)
+	assert.False(t, changed)
+
+	_, changed, err = SaveModelAliasConfigurationWithChanges(nil, false, 45)
+	require.NoError(t, err)
+	assert.False(t, changed)
+}
+
+func TestSaveModelAliasConfigurationCopiesOnlyChangedCurrentGroups(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	setModelAliasPricingOptions(t, map[string]string{
+		"ModelPrice": `{"changed-main":1,"unchanged-main":4}`,
+	})
+	groups := []ModelAliasGroup{
+		{Alias: "changed-main", Models: []string{"changed-member"}},
+		{Alias: "unchanged-main", Models: []string{"unchanged-member"}},
+	}
+	_, err := SaveModelAliasConfiguration(groups, true, 30)
+	require.NoError(t, err)
+	require.NoError(t, UpdateOption("ModelPrice", `{"changed-main":2,"changed-member":1,"unchanged-main":9,"unchanged-member":4}`))
+
+	_, changed, err := SaveModelAliasConfigurationWithChanges([]ModelAliasGroup{
+		{Alias: "changed-main", Models: []string{"changed-member", "changed-second"}},
+		groups[1],
+	}, true, 30)
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.Equal(t, float64(2), getModelAliasPricingValue(t, "ModelPrice", "changed-member"))
+	assert.Equal(t, float64(2), getModelAliasPricingValue(t, "ModelPrice", "changed-second"))
+	assert.Equal(t, float64(4), getModelAliasPricingValue(t, "ModelPrice", "unchanged-member"))
+}
+
+func TestModelAliasScanDoesNotCommitStalePrices(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	setModelAliasPricingOptions(t, map[string]string{"ModelPrice": `{"stale-main":1}`})
+	groups := []ModelAliasGroup{{Alias: "stale-main", Models: []string{"stale-target"}}}
+	_, err := SaveModelAliasConfiguration(groups, true, 30)
+	require.NoError(t, err)
+	revision := getModelAliasScanRevision()
+	require.NoError(t, UpdateOption("ModelPrice", `{"stale-main":2,"stale-target":1}`))
+	require.NoError(t, InvalidateModelAliasPendingCount("stale-main"))
+
+	stored, _, err := saveModelAliasScanResult(revision, groups, map[string]int{"stale-main": 99})
+	require.NoError(t, err)
+	assert.False(t, stored)
+	assert.Equal(t, float64(1), getModelAliasPricingValue(t, "ModelPrice", "stale-target"))
+	assert.NotEqual(t, 99, getModelAliasPendingCounts()["stale-main"])
+}
+
+func TestModelAliasScanDoesNotCommitAfterScanningIsDisabled(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	setModelAliasPricingOptions(t, map[string]string{"ModelPrice": `{"disabled-main":1}`})
+	groups := []ModelAliasGroup{{Alias: "disabled-main", Models: []string{"disabled-target"}}}
+	_, err := SaveModelAliasConfiguration(groups, true, 30)
+	require.NoError(t, err)
+	revision := getModelAliasScanRevision()
+	require.NoError(t, UpdateOption("ModelPrice", `{"disabled-main":2,"disabled-target":1}`))
+	require.NoError(t, UpdateOption(ModelPricingLocksOptionKey, `{}`))
+	require.NoError(t, DB.Model(&Option{}).
+		Where(commonKeyCol+" = ?", ModelAliasScanEnabledOptionKey).
+		Update("value", "false").Error)
+
+	stored, _, err := saveModelAliasScanResult(revision, groups, map[string]int{"disabled-main": 99})
+	require.NoError(t, err)
+	assert.False(t, stored)
+	summary, err := ScanModelAliasPendingCounts(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Zero(t, summary.ScannedGroups)
+	assert.Equal(t, float64(1), getModelAliasPricingValue(t, "ModelPrice", "disabled-target"))
+	assert.Empty(t, getModelAliasPendingCounts())
+	locks, err := GetModelPricingLocks()
+	require.NoError(t, err)
+	assert.Empty(t, locks)
+}
+
+func setModelAliasPricingOptions(t *testing.T, values map[string]string) {
+	t.Helper()
+	for key, value := range values {
+		require.NoError(t, UpdateOption(key, value), key)
+	}
+}
+
+func getModelAliasPricingValue(t *testing.T, key string, modelName string) any {
+	t.Helper()
+	common.OptionMapRWMutex.RLock()
+	raw := common.OptionMap[key]
+	common.OptionMapRWMutex.RUnlock()
+	values := make(map[string]any)
+	require.NoError(t, common.UnmarshalJsonStr(raw, &values), key)
+	value, exists := values[modelName]
+	require.True(t, exists, "%s 缺少模型 %s", key, modelName)
+	return value
+}
+
+func readMemoryOptionValue(key string) string {
+	common.OptionMapRWMutex.RLock()
+	defer common.OptionMapRWMutex.RUnlock()
+	return common.OptionMap[key]
+}
+
+func readDatabaseOptionValue(t *testing.T, key string) string {
+	t.Helper()
+	var option Option
+	require.NoError(t, DB.Where(commonKeyCol+" = ?", key).First(&option).Error)
+	return option.Value
+}
+
+func readModelAliasMemoryOptionValues() map[string]string {
+	keys := append([]string{
+		ModelAliasGroupsOptionKey,
+		ModelAliasScanEnabledOptionKey,
+		ModelAliasScanIntervalOptionKey,
+		ModelAliasPendingCountsOptionKey,
+		modelAliasScanRevisionOptionKey,
+		ModelPricingLocksOptionKey,
+	}, modelPricingSyncOptionKeys...)
+	values := make(map[string]string, len(keys))
+	common.OptionMapRWMutex.RLock()
+	for _, key := range keys {
+		values[key] = common.OptionMap[key]
+	}
+	common.OptionMapRWMutex.RUnlock()
+	return values
+}
+
+func assertModelAliasPricingMissing(t *testing.T, key string, modelName string) {
+	t.Helper()
+	common.OptionMapRWMutex.RLock()
+	raw := common.OptionMap[key]
+	common.OptionMapRWMutex.RUnlock()
+	values := make(map[string]any)
+	require.NoError(t, common.UnmarshalJsonStr(raw, &values), key)
+	assert.NotContains(t, values, modelName, key)
+}
+
+func readModelAliasOptionValues(t *testing.T) map[string]string {
+	t.Helper()
+	keys := append([]string{
+		ModelAliasGroupsOptionKey,
+		ModelAliasScanEnabledOptionKey,
+		ModelAliasScanIntervalOptionKey,
+		ModelAliasPendingCountsOptionKey,
+		modelAliasScanRevisionOptionKey,
+		ModelPricingLocksOptionKey,
+	}, modelPricingSyncOptionKeys...)
+	var options []Option
+	require.NoError(t, DB.Where(commonKeyCol+" IN ?", keys).Find(&options).Error)
+	values := make(map[string]string, len(options))
+	for _, option := range options {
+		values[option.Key] = option.Value
+	}
+	return values
 }
 
 func newModelAliasTestChannel(name string, models string, mapping map[string]string) *Channel {

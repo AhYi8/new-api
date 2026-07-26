@@ -95,8 +95,12 @@ export function ModelAliasGroupsSection() {
     scanIntervalMinutes < MINIMUM_SCAN_INTERVAL_MINUTES
   const saveMutation = useMutation({
     mutationFn: updateModelAliasGroups,
-    onSuccess: (response) => {
+    onSuccess: async (response) => {
       queryClient.setQueryData(MODEL_ALIAS_QUERY_KEY, response)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['system-options'] }),
+        queryClient.invalidateQueries({ queryKey: ['model-pricing-locks'] }),
+      ])
       toast.success(t('Model alias groups saved'))
     },
     onError: (error: Error) => toast.error(error.message),
@@ -404,12 +408,12 @@ export function ModelAliasGroupsSection() {
       <div className='flex flex-col gap-1'>
         <p className='text-muted-foreground text-sm'>
           {t(
-            'Define one unified name for exact provider model names, then manually apply it to matching channels.'
+            'Define one unified name and price template for exact provider model names, then manually apply it to matching channels.'
           )}
         </p>
         <p className='text-muted-foreground text-xs'>
           {t(
-            'Scheduled detection only updates pending counts. Applying a group still uses the existing channel mapping and routing flow.'
+            'Scheduled detection refreshes pending counts, reapplies group prices, and restores missing price locks. Applying a group still uses the existing channel mapping and routing flow.'
           )}
         </p>
       </div>
@@ -422,7 +426,7 @@ export function ModelAliasGroupsSection() {
             </FieldLabel>
             <FieldDescription>
               {t(
-                'Periodically refresh pending counts for all model alias groups.'
+                'Periodically refresh pending counts, group prices, and price locks for all model alias groups.'
               )}
             </FieldDescription>
           </FieldContent>
@@ -575,7 +579,9 @@ export function ModelAliasGroupsSection() {
               )
             : ''
         }
-        desc={t('This action cannot be undone.')}
+        desc={t(
+          'Copied model prices and existing price locks will remain after the group is deleted.'
+        )}
         confirmText={t('Delete')}
         destructive
         isLoading={saveMutation.isPending}

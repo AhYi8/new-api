@@ -58,7 +58,7 @@ func UpdateModelAliasGroups(c *gin.Context) {
 	if request.ScanIntervalMinutes != nil {
 		scanIntervalMinutes = *request.ScanIntervalMinutes
 	}
-	configuration, err := model.SaveModelAliasConfiguration(*request.Groups, scanEnabled, scanIntervalMinutes)
+	configuration, hasChangedGroups, err := model.SaveModelAliasConfigurationWithChanges(*request.Groups, scanEnabled, scanIntervalMinutes)
 	if err != nil {
 		common.ApiErrorMsg(c, err.Error())
 		return
@@ -68,7 +68,9 @@ func UpdateModelAliasGroups(c *gin.Context) {
 		"scan_enabled":          configuration.ScanEnabled,
 		"scan_interval_minutes": configuration.ScanIntervalMinutes,
 	})
-	requestModelAliasScan()
+	if hasChangedGroups {
+		requestModelAliasScan()
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": configuration})
 }
 
@@ -111,6 +113,9 @@ func ApplyModelAliasGroup(c *gin.Context) {
 }
 
 func requestModelAliasScan() {
+	if !model.IsModelAliasScanEnabled() {
+		return
+	}
 	groups, err := model.GetModelAliasGroups()
 	if err != nil {
 		common.SysLog("读取模型别名组失败，无法请求扫描: " + err.Error())

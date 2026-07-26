@@ -10,6 +10,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -103,5 +104,33 @@ func TestFilterLockedPricingDifferences(t *testing.T) {
 	assert.Equal(t, []string{"locked-a", "locked-b"}, ignored)
 	assert.Equal(t, map[string]map[string]dto.DifferenceItem{
 		"unlocked": {"model_ratio": {}},
+	}, differences)
+}
+
+func TestAliasGroupAutomaticLocksFilterUpstreamPricingDifferences(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Option{}))
+
+	setupModelAliasControllerOptions(t, map[string]string{
+		"ModelPrice": `{"alias-main":1}`,
+	})
+
+	_, err := model.SaveModelAliasConfiguration([]model.ModelAliasGroup{
+		{Alias: "alias-main", Models: []string{"alias-member"}},
+	}, true, 30)
+	require.NoError(t, err)
+	locks, err := model.GetModelPricingLocks()
+	require.NoError(t, err)
+	differences := map[string]map[string]dto.DifferenceItem{
+		"alias-main":   {"model_price": {}},
+		"alias-member": {"model_price": {}},
+		"unlocked":     {"model_price": {}},
+	}
+
+	ignored := filterLockedPricingDifferences(differences, locks)
+
+	assert.Equal(t, []string{"alias-main", "alias-member"}, ignored)
+	assert.Equal(t, map[string]map[string]dto.DifferenceItem{
+		"unlocked": {"model_price": {}},
 	}, differences)
 }

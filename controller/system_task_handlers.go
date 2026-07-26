@@ -112,7 +112,7 @@ func (modelUpdateHandler) Run(ctx context.Context, task *model.SystemTask, runne
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 
-// modelAliasScanHandler 只读取渠道配置并更新别名组待处理数量，不修改渠道或路由状态。
+// modelAliasScanHandler 更新待处理数量，并定期恢复别名组价格与价格锁；不会修改渠道或路由状态。
 type modelAliasScanHandler struct{}
 
 func (modelAliasScanHandler) Type() string { return model.SystemTaskTypeModelAliasScan }

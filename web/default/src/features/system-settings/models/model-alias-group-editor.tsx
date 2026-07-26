@@ -224,7 +224,7 @@ export function ModelAliasGroupEditor({
       }}
       title={group ? t('Edit model alias group') : t('Add model alias group')}
       description={t(
-        'A unified name maps exact provider model names without changing request routing.'
+        'A unified name maps exact provider model names and serves as the price template without changing request routing.'
       )}
       contentClassName='sm:max-w-xl'
       footer={

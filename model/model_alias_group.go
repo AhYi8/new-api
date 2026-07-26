@@ -89,10 +89,19 @@ type ModelAliasApplySelection struct {
 	TargetModels       map[int]string
 }
 
+// ModelAliasPriceSyncSkip 记录定时同步因主模型缺少可用价格而跳过的别名组。
+type ModelAliasPriceSyncSkip struct {
+	Alias  string `json:"alias"`
+	Reason string `json:"reason"`
+}
+
 type ModelAliasScanSummary struct {
-	ScannedGroups   int `json:"scanned_groups"`
-	ScannedChannels int `json:"scanned_channels"`
-	PendingCount    int `json:"pending_count"`
+	ScannedGroups   int                       `json:"scanned_groups"`
+	ScannedChannels int                       `json:"scanned_channels"`
+	PendingCount    int                       `json:"pending_count"`
+	SyncedGroups    int                       `json:"synced_groups"`
+	SyncedModels    int                       `json:"synced_models"`
+	SkippedGroups   []ModelAliasPriceSyncSkip `json:"skipped_groups,omitempty"`
 	revision        string
 }
 
@@ -257,29 +266,38 @@ func GetModelAliasConfiguration() (*ModelAliasConfiguration, error) {
 }
 
 func SaveModelAliasConfiguration(groups []ModelAliasGroup, scanEnabled bool, scanIntervalMinutes int) (*ModelAliasConfiguration, error) {
+	configuration, _, err := SaveModelAliasConfigurationWithChanges(groups, scanEnabled, scanIntervalMinutes)
+	return configuration, err
+}
+
+// SaveModelAliasConfigurationWithChanges 返回事务内判定的新增或内容变化标记，
+// 供调用方决定是否立即排队扫描，避免使用事务外快照产生竞态。
+func SaveModelAliasConfigurationWithChanges(groups []ModelAliasGroup, scanEnabled bool, scanIntervalMinutes int) (*ModelAliasConfiguration, bool, error) {
 	normalized, err := NormalizeModelAliasGroups(groups)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if scanIntervalMinutes < MinimumModelAliasScanIntervalMinutes {
-		return nil, fmt.Errorf("模型别名扫描间隔不能小于 %d 分钟", MinimumModelAliasScanIntervalMinutes)
+		return nil, false, fmt.Errorf("模型别名扫描间隔不能小于 %d 分钟", MinimumModelAliasScanIntervalMinutes)
 	}
 	if int64(scanIntervalMinutes) > maxModelAliasScanIntervalMinutes {
-		return nil, errors.New("模型别名扫描间隔过大")
+		return nil, false, errors.New("模型别名扫描间隔过大")
 	}
 	data, err := common.Marshal(normalized)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	optionKeys := []string{
+	hasChangedGroups := false
+	optionKeys := append([]string{
 		ModelAliasGroupsOptionKey,
 		ModelAliasScanEnabledOptionKey,
 		ModelAliasScanIntervalOptionKey,
 		ModelAliasPendingCountsOptionKey,
 		modelAliasScanRevisionOptionKey,
-	}
-	err = mutateModelAliasOptions(optionKeys, func(values map[string]string) (map[string]string, error) {
+		ModelPricingLocksOptionKey,
+	}, modelPricingSyncOptionKeys...)
+	err = mutateModelAliasPricingOptions(optionKeys, func(values map[string]string) (map[string]string, error) {
 		currentGroups, parseErr := parseModelAliasGroups(values[ModelAliasGroupsOptionKey])
 		if parseErr != nil {
 			return nil, parseErr
@@ -297,6 +315,21 @@ func SaveModelAliasConfiguration(groups []ModelAliasGroup, scanEnabled bool, sca
 				delete(counts, alias)
 			}
 		}
+		changedGroups := make([]ModelAliasGroup, 0, len(changedAliases))
+		for _, group := range normalized {
+			if _, changed := changedAliases[group.Alias]; changed {
+				changedGroups = append(changedGroups, group)
+			}
+		}
+		pricingUpdates := map[string]string{}
+		if len(changedGroups) > 0 {
+			var syncErr error
+			pricingUpdates, _, syncErr = synchronizeModelAliasPricing(values, changedGroups, true)
+			if syncErr != nil {
+				return nil, syncErr
+			}
+			hasChangedGroups = true
+		}
 		countsData, marshalErr := common.Marshal(counts)
 		if marshalErr != nil {
 			return nil, marshalErr
@@ -308,12 +341,19 @@ func SaveModelAliasConfiguration(groups []ModelAliasGroup, scanEnabled bool, sca
 			ModelAliasPendingCountsOptionKey: string(countsData),
 			modelAliasScanRevisionOptionKey:  common.GetRandomString(24),
 		}
+		for key, value := range pricingUpdates {
+			updates[key] = value
+		}
 		return updates, nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return GetModelAliasConfiguration()
+	configuration, err := GetModelAliasConfiguration()
+	if err != nil {
+		return nil, false, err
+	}
+	return configuration, hasChangedGroups, nil
 }
 
 func IsModelAliasScanEnabled() bool {
@@ -410,36 +450,29 @@ func mutateModelAliasOptions(keys []string, mutate func(values map[string]string
 	// 事务提交和本地 OptionMap 更新必须保持同一顺序，避免并发操作把旧值回写到内存。
 	modelAliasOptionsMu.Lock()
 	defer modelAliasOptionsMu.Unlock()
+	return mutateModelOptions(keys, mutate)
+}
 
-	keys = append([]string(nil), keys...)
-	sort.Strings(keys)
-	defaults := map[string]string{
-		ModelAliasGroupsOptionKey:        "[]",
-		ModelAliasScanEnabledOptionKey:   "true",
-		ModelAliasScanIntervalOptionKey:  strconv.Itoa(DefaultModelAliasScanIntervalMinutes),
-		ModelAliasPendingCountsOptionKey: "{}",
-		modelAliasScanRevisionOptionKey:  "",
-	}
+// mutateModelAliasPricingOptions 固定按价格锁、别名锁的顺序串行化跨配置事务。
+func mutateModelAliasPricingOptions(keys []string, mutate func(values map[string]string) (map[string]string, error)) error {
+	modelPricingMutationMutex.Lock()
+	defer modelPricingMutationMutex.Unlock()
+	modelAliasOptionsMu.Lock()
+	defer modelAliasOptionsMu.Unlock()
+	return mutateModelOptions(keys, mutate)
+}
+
+func mutateModelOptions(keys []string, mutate func(values map[string]string) (map[string]string, error)) error {
 	updates := make(map[string]string)
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		for _, key := range keys {
-			option := Option{Key: key}
-			if err := tx.Where(commonKeyCol+" = ?", key).Attrs(Option{Value: defaults[key]}).FirstOrCreate(&option).Error; err != nil {
-				return err
-			}
-		}
-		var options []Option
-		if err := lockForUpdate(tx).Where(commonKeyCol+" IN ?", keys).Find(&options).Error; err != nil {
+		options, err := getOptionsForUpdate(tx, keys)
+		if err != nil {
 			return err
 		}
-		values := make(map[string]string, len(keys))
-		for _, key := range keys {
-			values[key] = defaults[key]
+		values := make(map[string]string, len(options))
+		for key, option := range options {
+			values[key] = option.Value
 		}
-		for _, option := range options {
-			values[option.Key] = option.Value
-		}
-		var err error
 		updates, err = mutate(values)
 		if err != nil {
 			return err
@@ -459,13 +492,32 @@ func mutateModelAliasOptions(keys []string, mutate func(values map[string]string
 	if err != nil {
 		return err
 	}
-	// 这些键只保存模型别名配置，不需要触发其他配置副作用；一次性更新内存映射，
-	// 让读取方不会观察到同一事务的半套值。
+	updateKeys := make([]string, 0, len(updates))
+	for key := range updates {
+		updateKeys = append(updateKeys, key)
+	}
+	sort.Strings(updateKeys)
+	pricingKeySet := make(map[string]struct{}, len(modelPricingSyncOptionKeys))
+	for _, key := range modelPricingSyncOptionKeys {
+		pricingKeySet[key] = struct{}{}
+	}
+	// 别名配置与价格锁没有额外运行时副作用，仍以一次内存写锁发布，避免读取到半套事务结果。
 	common.OptionMapRWMutex.Lock()
-	for key, value := range updates {
-		common.OptionMap[key] = value
+	for _, key := range updateKeys {
+		if _, isPricingOption := pricingKeySet[key]; !isPricingOption {
+			common.OptionMap[key] = updates[key]
+		}
 	}
 	common.OptionMapRWMutex.Unlock()
+	pricingUpdates := make(map[string]string)
+	for _, key := range updateKeys {
+		if _, isPricingOption := pricingKeySet[key]; isPricingOption {
+			pricingUpdates[key] = updates[key]
+		}
+	}
+	if err := publishModelPricingOptions(pricingUpdates); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -626,9 +678,12 @@ func ScanModelAliasPendingCounts(ctx context.Context, report func(processed, tot
 		if err := ctx.Err(); err != nil {
 			return ModelAliasScanSummary{}, err
 		}
-		groups, revision, err := getModelAliasScanSnapshot()
+		groups, revision, enabled, err := getModelAliasScanSnapshot()
 		if err != nil {
 			return ModelAliasScanSummary{}, err
+		}
+		if !enabled {
+			return ModelAliasScanSummary{revision: revision}, nil
 		}
 		channels, err := getChannelsForModelAliasContext(ctx)
 		if err != nil {
@@ -663,7 +718,7 @@ func ScanModelAliasPendingCounts(ctx context.Context, report func(processed, tot
 			}
 		}
 
-		stored, err := saveModelAliasPendingCounts(revision, counts)
+		stored, syncResult, err := saveModelAliasScanResult(revision, groups, counts)
 		if err != nil {
 			return ModelAliasScanSummary{}, err
 		}
@@ -676,6 +731,12 @@ func ScanModelAliasPendingCounts(ctx context.Context, report func(processed, tot
 		}
 		if currentRevision != revision {
 			continue
+		}
+		summary.SyncedGroups = syncResult.SyncedGroups
+		summary.SyncedModels = syncResult.SyncedModels
+		summary.SkippedGroups = syncResult.SkippedGroups
+		for _, skippedGroup := range summary.SkippedGroups {
+			common.SysLog(fmt.Sprintf("模型别名组 %s 定时价格同步已跳过: %s", skippedGroup.Alias, skippedGroup.Reason))
 		}
 		return summary, nil
 	}
@@ -700,15 +761,16 @@ func getModelAliasScanRevisionFromDatabase() (string, error) {
 	return option.Value, nil
 }
 
-func getModelAliasScanSnapshot() ([]ModelAliasGroup, string, error) {
+func getModelAliasScanSnapshot() ([]ModelAliasGroup, string, bool, error) {
 	defaults := map[string]string{
 		ModelAliasGroupsOptionKey:       "[]",
+		ModelAliasScanEnabledOptionKey:  "true",
 		modelAliasScanRevisionOptionKey: "",
 	}
-	keys := []string{ModelAliasGroupsOptionKey, modelAliasScanRevisionOptionKey}
+	keys := []string{ModelAliasGroupsOptionKey, ModelAliasScanEnabledOptionKey, modelAliasScanRevisionOptionKey}
 	var options []Option
 	if err := DB.Select(commonKeyCol+", value").Where(commonKeyCol+" IN ?", keys).Find(&options).Error; err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
 	values := defaults
 	for _, option := range options {
@@ -716,9 +778,13 @@ func getModelAliasScanSnapshot() ([]ModelAliasGroup, string, error) {
 	}
 	groups, err := parseModelAliasGroups(values[ModelAliasGroupsOptionKey])
 	if err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
-	return groups, values[modelAliasScanRevisionOptionKey], nil
+	enabled, err := strconv.ParseBool(values[ModelAliasScanEnabledOptionKey])
+	if err != nil {
+		return nil, "", false, err
+	}
+	return groups, values[modelAliasScanRevisionOptionKey], enabled, nil
 }
 
 func saveModelAliasPendingCounts(revision string, counts map[string]int) (bool, error) {
@@ -738,6 +804,35 @@ func saveModelAliasPendingCounts(revision string, counts map[string]int) (bool, 
 		},
 	)
 	return stored, err
+}
+
+func saveModelAliasScanResult(revision string, groups []ModelAliasGroup, counts map[string]int) (bool, modelAliasPricingSyncResult, error) {
+	data, err := common.Marshal(counts)
+	if err != nil {
+		return false, modelAliasPricingSyncResult{}, err
+	}
+	stored := false
+	syncResult := modelAliasPricingSyncResult{}
+	keys := append([]string{
+		ModelAliasScanEnabledOptionKey,
+		ModelAliasPendingCountsOptionKey,
+		modelAliasScanRevisionOptionKey,
+		ModelPricingLocksOptionKey,
+	}, modelPricingSyncOptionKeys...)
+	err = mutateModelAliasPricingOptions(keys, func(values map[string]string) (map[string]string, error) {
+		if values[modelAliasScanRevisionOptionKey] != revision || values[ModelAliasScanEnabledOptionKey] != "true" {
+			return nil, nil
+		}
+		pricingUpdates, result, syncErr := synchronizeModelAliasPricing(values, groups, false)
+		if syncErr != nil {
+			return nil, syncErr
+		}
+		stored = true
+		syncResult = result
+		pricingUpdates[ModelAliasPendingCountsOptionKey] = string(data)
+		return pricingUpdates, nil
+	})
+	return stored, syncResult, err
 }
 
 func isPendingModelAliasStatus(status ModelAliasPreviewStatus) bool {

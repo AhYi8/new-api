@@ -2,7 +2,9 @@ package billing_setting
 
 import (
 	"fmt"
+	"sync"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/samber/lo"
@@ -27,6 +29,8 @@ var billingSetting = BillingSetting{
 	BillingExpr: make(map[string]string),
 }
 
+var billingSettingMu sync.RWMutex
+
 func init() {
 	config.GlobalConfig.Register("billing_setting", &billingSetting)
 }
@@ -36,34 +40,84 @@ func init() {
 // ---------------------------------------------------------------------------
 
 func GetBillingMode(model string) string {
-	if mode, ok := billingSetting.BillingMode[model]; ok {
-		return mode
-	}
-	return BillingModeRatio
+	mode, _, _ := GetBillingConfig(model)
+	return mode
 }
 
 func GetBillingExpr(model string) (string, bool) {
-	expr, ok := billingSetting.BillingExpr[model]
+	_, expr, ok := GetBillingConfig(model)
 	return expr, ok
 }
 
+// GetBillingConfig 在同一读锁内返回模式与表达式，避免调用方读取到跨版本组合。
+func GetBillingConfig(model string) (mode string, expr string, hasExpr bool) {
+	billingSettingMu.RLock()
+	defer billingSettingMu.RUnlock()
+	mode = billingSetting.BillingMode[model]
+	if mode == "" {
+		mode = BillingModeRatio
+	}
+	expr, hasExpr = billingSetting.BillingExpr[model]
+	return mode, expr, hasExpr
+}
+
 func GetBillingModeCopy() map[string]string {
+	billingSettingMu.RLock()
+	defer billingSettingMu.RUnlock()
 	return lo.Assign(billingSetting.BillingMode)
 }
 
 func GetBillingExprCopy() map[string]string {
+	billingSettingMu.RLock()
+	defer billingSettingMu.RUnlock()
 	return lo.Assign(billingSetting.BillingExpr)
 }
 
 func GetPricingSyncData(base map[string]any) map[string]any {
+	billingSettingMu.RLock()
+	defer billingSettingMu.RUnlock()
 	extra := make(map[string]any, 2)
-	if modes := GetBillingModeCopy(); len(modes) > 0 {
+	if modes := lo.Assign(billingSetting.BillingMode); len(modes) > 0 {
 		extra[BillingModeField] = modes
 	}
-	if exprs := GetBillingExprCopy(); len(exprs) > 0 {
+	if exprs := lo.Assign(billingSetting.BillingExpr); len(exprs) > 0 {
 		extra[BillingExprField] = exprs
 	}
 	return lo.Assign(base, extra)
+}
+
+// UpdateBillingConfig 在同一写锁内替换模式与表达式，保证热路径始终读取到同一版本。
+func UpdateBillingConfig(modeJSON string, exprJSON string) error {
+	modes := make(map[string]string)
+	if err := common.UnmarshalJsonStr(modeJSON, &modes); err != nil {
+		return err
+	}
+	exprs := make(map[string]string)
+	if err := common.UnmarshalJsonStr(exprJSON, &exprs); err != nil {
+		return err
+	}
+	billingSettingMu.Lock()
+	billingSetting.BillingMode = modes
+	billingSetting.BillingExpr = exprs
+	billingSettingMu.Unlock()
+	return nil
+}
+
+// UpdateBillingField 保持通用 Option 更新接口兼容，并让单字段更新也受并发保护。
+func UpdateBillingField(field string, value string) error {
+	parsed := make(map[string]string)
+	if err := common.UnmarshalJsonStr(value, &parsed); err != nil {
+		return err
+	}
+	billingSettingMu.Lock()
+	defer billingSettingMu.Unlock()
+	switch field {
+	case BillingModeField:
+		billingSetting.BillingMode = parsed
+	case BillingExprField:
+		billingSetting.BillingExpr = parsed
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

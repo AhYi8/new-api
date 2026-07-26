@@ -179,24 +179,11 @@ func TestUpdateOptionRejectsModelAliasGroupsKey(t *testing.T) {
 	assert.Equal(t, "该配置不允许通过通用设置接口修改", response.Message)
 }
 
-func TestUpdateModelAliasGroupsSavesScanSettingsAndEnqueuesScan(t *testing.T) {
+func TestUpdateModelAliasGroupsSavesScanSettingsAndRespectsScanSwitch(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
 	require.NoError(t, db.AutoMigrate(&model.Option{}, &model.SystemTask{}, &model.SystemTaskLock{}))
 
-	common.OptionMapRWMutex.Lock()
-	previousOptionMap := common.OptionMap
-	common.OptionMap = map[string]string{
-		model.ModelAliasGroupsOptionKey:        "[]",
-		model.ModelAliasScanEnabledOptionKey:   "true",
-		model.ModelAliasScanIntervalOptionKey:  "30",
-		model.ModelAliasPendingCountsOptionKey: "{}",
-	}
-	common.OptionMapRWMutex.Unlock()
-	t.Cleanup(func() {
-		common.OptionMapRWMutex.Lock()
-		common.OptionMap = previousOptionMap
-		common.OptionMapRWMutex.Unlock()
-	})
+	setupModelAliasControllerOptions(t, map[string]string{"ModelRatio": `{"alias":1}`})
 
 	recorder := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(recorder)
@@ -224,14 +211,13 @@ func TestUpdateModelAliasGroupsSavesScanSettingsAndEnqueuesScan(t *testing.T) {
 
 	task, err := model.GetActiveSystemTask(model.SystemTaskTypeModelAliasScan)
 	require.NoError(t, err)
-	require.NotNil(t, task)
-	assert.Equal(t, model.SystemTaskStatusPending, task.Status)
+	assert.Nil(t, task)
 
 	secondRecorder := httptest.NewRecorder()
 	secondContext, _ := gin.CreateTestContext(secondRecorder)
 	secondContext.Request = httptest.NewRequest("PUT", "/api/option/model-alias-groups", strings.NewReader(`{
 		"groups":[{"alias":"alias","models":["vendor/model"]}],
-		"scan_enabled":false,
+		"scan_enabled":true,
 		"scan_interval_minutes":45
 	}`))
 	UpdateModelAliasGroups(secondContext)
@@ -240,6 +226,27 @@ func TestUpdateModelAliasGroupsSavesScanSettingsAndEnqueuesScan(t *testing.T) {
 	}
 	require.NoError(t, common.Unmarshal(secondRecorder.Body.Bytes(), &secondResponse))
 	require.True(t, secondResponse.Success)
+	task, err = model.GetActiveSystemTask(model.SystemTaskTypeModelAliasScan)
+	require.NoError(t, err)
+	assert.Nil(t, task)
+
+	thirdRecorder := httptest.NewRecorder()
+	thirdContext, _ := gin.CreateTestContext(thirdRecorder)
+	thirdContext.Request = httptest.NewRequest("PUT", "/api/option/model-alias-groups", strings.NewReader(`{
+		"groups":[{"alias":"alias","models":["vendor/model","vendor/second"]}],
+		"scan_enabled":true,
+		"scan_interval_minutes":45
+	}`))
+	UpdateModelAliasGroups(thirdContext)
+	var thirdResponse struct {
+		Success bool `json:"success"`
+	}
+	require.NoError(t, common.Unmarshal(thirdRecorder.Body.Bytes(), &thirdResponse))
+	require.True(t, thirdResponse.Success)
+	task, err = model.GetActiveSystemTask(model.SystemTaskTypeModelAliasScan)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+	assert.Equal(t, model.SystemTaskStatusPending, task.Status)
 
 	var taskCount int64
 	require.NoError(t, db.Model(&model.SystemTask{}).
@@ -252,20 +259,7 @@ func TestUpdateModelAliasGroupsAllowsDeletingLastGroupWithoutEnqueue(t *testing.
 	db := setupModelListControllerTestDB(t)
 	require.NoError(t, db.AutoMigrate(&model.Option{}, &model.SystemTask{}, &model.SystemTaskLock{}))
 
-	common.OptionMapRWMutex.Lock()
-	previousOptionMap := common.OptionMap
-	common.OptionMap = map[string]string{
-		model.ModelAliasGroupsOptionKey:        "[]",
-		model.ModelAliasScanEnabledOptionKey:   "true",
-		model.ModelAliasScanIntervalOptionKey:  "30",
-		model.ModelAliasPendingCountsOptionKey: "{}",
-	}
-	common.OptionMapRWMutex.Unlock()
-	t.Cleanup(func() {
-		common.OptionMapRWMutex.Lock()
-		common.OptionMap = previousOptionMap
-		common.OptionMapRWMutex.Unlock()
-	})
+	setupModelAliasControllerOptions(t, map[string]string{"ModelRatio": `{"alias":1}`})
 	_, err := model.SaveModelAliasConfiguration([]model.ModelAliasGroup{
 		{Alias: "alias", Models: []string{"vendor/model"}},
 	}, true, 30)
@@ -293,4 +287,54 @@ func TestUpdateModelAliasGroupsAllowsDeletingLastGroupWithoutEnqueue(t *testing.
 	task, err := model.GetActiveSystemTask(model.SystemTaskTypeModelAliasScan)
 	require.NoError(t, err)
 	assert.Nil(t, task)
+}
+
+func setupModelAliasControllerOptions(t *testing.T, pricingOverrides map[string]string) {
+	t.Helper()
+	pricingKeys := []string{
+		"ModelRatio",
+		"CompletionRatio",
+		"CacheRatio",
+		"CreateCacheRatio",
+		"ImageRatio",
+		"AudioRatio",
+		"AudioCompletionRatio",
+		"ModelPrice",
+		"billing_setting.billing_mode",
+		"billing_setting.billing_expr",
+	}
+
+	common.OptionMapRWMutex.Lock()
+	previousOptionMap := common.OptionMap
+	nextOptionMap := map[string]string{
+		model.ModelAliasGroupsOptionKey:        "[]",
+		model.ModelAliasScanEnabledOptionKey:   "true",
+		model.ModelAliasScanIntervalOptionKey:  "30",
+		model.ModelAliasPendingCountsOptionKey: "{}",
+		model.ModelPricingLocksOptionKey:       "{}",
+	}
+	for _, key := range pricingKeys {
+		nextOptionMap[key] = previousOptionMap[key]
+		if nextOptionMap[key] == "" {
+			nextOptionMap[key] = "{}"
+		}
+	}
+	for key, value := range pricingOverrides {
+		nextOptionMap[key] = value
+	}
+	common.OptionMap = nextOptionMap
+	common.OptionMapRWMutex.Unlock()
+
+	t.Cleanup(func() {
+		for _, key := range pricingKeys {
+			value := previousOptionMap[key]
+			if value == "" {
+				value = "{}"
+			}
+			require.NoError(t, model.UpdateOption(key, value), key)
+		}
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap = previousOptionMap
+		common.OptionMapRWMutex.Unlock()
+	})
 }

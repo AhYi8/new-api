@@ -10,8 +10,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
-	"github.com/QuantumNous/new-api/setting/billing_setting"
-	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 )
 
@@ -80,7 +78,10 @@ func GetPricing() []Pricing {
 func InvalidatePricingCache() {
 	updatePricingLock.Lock()
 	defer updatePricingLock.Unlock()
+	invalidatePricingCacheUnlocked()
+}
 
+func invalidatePricingCacheUnlocked() {
 	pricingMap = nil
 	vendorsList = nil
 	lastGetPricingTime = time.Time{}
@@ -373,37 +374,34 @@ func updatePricing() {
 			pricing.Tags = meta.Tags
 			pricing.VendorID = meta.VendorID
 		}
-		modelPrice, findPrice := ratio_setting.GetModelPrice(model, false)
-		if findPrice {
-			pricing.ModelPrice = modelPrice
+		pricingSnapshot := GetModelPricingRuntimeSnapshot(model)
+		if pricingSnapshot.HasModelPrice {
+			pricing.ModelPrice = pricingSnapshot.ModelPrice
 			pricing.QuotaType = 1
 		} else {
-			modelRatio, _, _ := ratio_setting.GetModelRatio(model)
-			pricing.ModelRatio = modelRatio
-			pricing.CompletionRatio = ratio_setting.GetCompletionRatio(model)
+			pricing.ModelRatio = pricingSnapshot.ModelRatio
+			pricing.CompletionRatio = pricingSnapshot.CompletionRatio
 			pricing.QuotaType = 0
 		}
-		if cacheRatio, ok := ratio_setting.GetCacheRatio(model); ok {
-			pricing.CacheRatio = &cacheRatio
+		if pricingSnapshot.HasCacheRatio {
+			pricing.CacheRatio = &pricingSnapshot.CacheRatio
 		}
-		if createCacheRatio, ok := ratio_setting.GetCreateCacheRatio(model); ok {
-			pricing.CreateCacheRatio = &createCacheRatio
+		if pricingSnapshot.HasCreateCacheRatio {
+			pricing.CreateCacheRatio = &pricingSnapshot.CreateCacheRatio
 		}
-		if imageRatio, ok := ratio_setting.GetImageRatio(model); ok {
-			pricing.ImageRatio = &imageRatio
+		if pricingSnapshot.HasImageRatio {
+			pricing.ImageRatio = &pricingSnapshot.ImageRatio
 		}
-		if ratio_setting.ContainsAudioRatio(model) {
-			audioRatio := ratio_setting.GetAudioRatio(model)
-			pricing.AudioRatio = &audioRatio
+		if pricingSnapshot.HasAudioRatio {
+			pricing.AudioRatio = &pricingSnapshot.AudioRatio
 		}
-		if ratio_setting.ContainsAudioCompletionRatio(model) {
-			audioCompletionRatio := ratio_setting.GetAudioCompletionRatio(model)
-			pricing.AudioCompletionRatio = &audioCompletionRatio
+		if pricingSnapshot.HasAudioCompletionRatio {
+			pricing.AudioCompletionRatio = &pricingSnapshot.AudioCompletionRatio
 		}
-		if billingMode := billing_setting.GetBillingMode(model); billingMode == "tiered_expr" {
-			if expr, ok := billing_setting.GetBillingExpr(model); ok && strings.TrimSpace(expr) != "" {
-				pricing.BillingMode = billingMode
-				pricing.BillingExpr = expr
+		if pricingSnapshot.BillingMode == "tiered_expr" {
+			if pricingSnapshot.HasBillingExpr && strings.TrimSpace(pricingSnapshot.BillingExpr) != "" {
+				pricing.BillingMode = pricingSnapshot.BillingMode
+				pricing.BillingExpr = pricingSnapshot.BillingExpr
 			}
 		}
 		pricingMap = append(pricingMap, pricing)

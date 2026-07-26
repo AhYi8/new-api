@@ -7,6 +7,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/performance_setting"
@@ -263,6 +264,34 @@ func UpdateOptionsBulk(values map[string]string) error {
 }
 
 func updateOptionMap(key string, value string) (err error) {
+	if isModelPricingSyncOption(key) {
+		updatePricingLock.Lock()
+		modelPricingRuntimeRWMutex.Lock()
+		err = updateOptionMapUnlocked(key, value)
+		if err == nil {
+			invalidatePricingCacheUnlocked()
+		}
+		modelPricingRuntimeRWMutex.Unlock()
+		updatePricingLock.Unlock()
+		if err == nil {
+			ratio_setting.InvalidateExposedDataCache()
+		}
+		return err
+	}
+	return updateOptionMapUnlocked(key, value)
+}
+
+func updateOptionMapUnlocked(key string, value string) (err error) {
+	if key == "billing_setting.billing_mode" || key == "billing_setting.billing_expr" {
+		configKey := strings.TrimPrefix(key, "billing_setting.")
+		if err = billing_setting.UpdateBillingField(configKey, value); err != nil {
+			return err
+		}
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap[key] = value
+		common.OptionMapRWMutex.Unlock()
+		return nil
+	}
 	common.OptionMapRWMutex.Lock()
 	defer common.OptionMapRWMutex.Unlock()
 	common.OptionMap[key] = value
@@ -585,6 +614,15 @@ func updateOptionMap(key string, value string) (err error) {
 	return err
 }
 
+func isModelPricingSyncOption(key string) bool {
+	for _, pricingKey := range modelPricingSyncOptionKeys {
+		if key == pricingKey {
+			return true
+		}
+	}
+	return false
+}
+
 // handleConfigUpdate 处理分层配置更新，返回是否已处理
 func handleConfigUpdate(key, value string) bool {
 	parts := strings.SplitN(key, ".", 2)
@@ -594,7 +632,6 @@ func handleConfigUpdate(key, value string) bool {
 
 	configName := parts[0]
 	configKey := parts[1]
-
 	// 获取配置对象
 	cfg := config.GlobalConfig.Get(configName)
 	if cfg == nil {
@@ -612,9 +649,6 @@ func handleConfigUpdate(key, value string) bool {
 		performance_setting.UpdateAndSync()
 	} else if configName == "tool_price_setting" {
 		operation_setting.RebuildToolPriceIndex()
-	} else if configName == "billing_setting" {
-		InvalidatePricingCache()
-		ratio_setting.InvalidateExposedDataCache()
 	} else if configName == "theme" {
 		system_setting.UpdateAndSyncTheme()
 	}

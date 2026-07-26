@@ -70,13 +70,25 @@ func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) types.
 }
 
 func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens int, meta *types.TokenCountMeta) (types.PriceData, error) {
-	modelPrice, usePrice := ratio_setting.GetModelPrice(info.OriginModelName, false)
+	pricingSnapshot := model.GetModelPricingRuntimeSnapshot(info.OriginModelName)
+	modelPrice, usePrice := pricingSnapshot.ModelPrice, pricingSnapshot.HasModelPrice
 
 	groupRatioInfo := HandleGroupRatio(c, info)
 
-	// Check if this model uses tiered_expr billing
-	if billing_setting.GetBillingMode(info.OriginModelName) == billing_setting.BillingModeTieredExpr {
-		return modelPriceHelperTiered(c, info, promptTokens, meta, groupRatioInfo)
+	// 模式与表达式必须读取自同一配置快照，避免并发更新时跨版本计费。
+	billingMode, billingExpr, hasBillingExpr := pricingSnapshot.BillingMode, pricingSnapshot.BillingExpr, pricingSnapshot.HasBillingExpr
+	if billingMode == billing_setting.BillingModeTieredExpr {
+		if !hasBillingExpr {
+			return types.PriceData{}, fmt.Errorf("model %s is configured as tiered_expr but has no billing expression", info.OriginModelName)
+		}
+		priceData, err := modelPriceHelperTiered(c, info, promptTokens, meta, groupRatioInfo, billingExpr)
+		if err != nil {
+			return types.PriceData{}, err
+		}
+		priceData.HasAudioRatio = pricingSnapshot.HasAudioRatio
+		priceData.HasAudioCompletionRatio = pricingSnapshot.HasAudioCompletionRatio
+		info.PriceData = priceData
+		return priceData, nil
 	}
 
 	var preConsumedQuota int
@@ -97,7 +109,7 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		}
 		var success bool
 		var matchName string
-		modelRatio, success, matchName = ratio_setting.GetModelRatio(info.OriginModelName)
+		modelRatio, success, matchName = pricingSnapshot.ModelRatio, pricingSnapshot.HasModelRatio, pricingSnapshot.MatchedModelName
 		if !success {
 			acceptUnsetRatio := false
 			if info.UserSetting.AcceptUnsetRatioModel {
@@ -107,15 +119,15 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 				return types.PriceData{}, modelPriceNotConfiguredError(matchName, info.UserId)
 			}
 		}
-		completionRatio = ratio_setting.GetCompletionRatio(info.OriginModelName)
-		cacheRatio, _ = ratio_setting.GetCacheRatio(info.OriginModelName)
-		cacheCreationRatio, _ = ratio_setting.GetCreateCacheRatio(info.OriginModelName)
+		completionRatio = pricingSnapshot.CompletionRatio
+		cacheRatio = pricingSnapshot.CacheRatio
+		cacheCreationRatio = pricingSnapshot.CreateCacheRatio
 		cacheCreationRatio5m = cacheCreationRatio
 		// 固定1h和5min缓存写入价格的比例
 		cacheCreationRatio1h = cacheCreationRatio * claudeCacheCreation1hMultiplier
-		imageRatio, _ = ratio_setting.GetImageRatio(info.OriginModelName)
-		audioRatio = ratio_setting.GetAudioRatio(info.OriginModelName)
-		audioCompletionRatio = ratio_setting.GetAudioCompletionRatio(info.OriginModelName)
+		imageRatio = pricingSnapshot.ImageRatio
+		audioRatio = pricingSnapshot.AudioRatio
+		audioCompletionRatio = pricingSnapshot.AudioCompletionRatio
 		ratio := modelRatio * groupRatioInfo.GroupRatio
 		quota, err := common.QuotaFromFloatStrict(float64(preConsumedTokens) * ratio)
 		if err != nil {
@@ -148,20 +160,22 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 	}
 
 	priceData := types.PriceData{
-		FreeModel:            freeModel,
-		ModelPrice:           modelPrice,
-		ModelRatio:           modelRatio,
-		CompletionRatio:      completionRatio,
-		GroupRatioInfo:       groupRatioInfo,
-		UsePrice:             usePrice,
-		CacheRatio:           cacheRatio,
-		ImageRatio:           imageRatio,
-		AudioRatio:           audioRatio,
-		AudioCompletionRatio: audioCompletionRatio,
-		CacheCreationRatio:   cacheCreationRatio,
-		CacheCreation5mRatio: cacheCreationRatio5m,
-		CacheCreation1hRatio: cacheCreationRatio1h,
-		QuotaToPreConsume:    preConsumedQuota,
+		FreeModel:               freeModel,
+		ModelPrice:              modelPrice,
+		ModelRatio:              modelRatio,
+		CompletionRatio:         completionRatio,
+		GroupRatioInfo:          groupRatioInfo,
+		UsePrice:                usePrice,
+		CacheRatio:              cacheRatio,
+		ImageRatio:              imageRatio,
+		AudioRatio:              audioRatio,
+		AudioCompletionRatio:    audioCompletionRatio,
+		HasAudioRatio:           pricingSnapshot.HasAudioRatio,
+		HasAudioCompletionRatio: pricingSnapshot.HasAudioCompletionRatio,
+		CacheCreationRatio:      cacheCreationRatio,
+		CacheCreation5mRatio:    cacheCreationRatio5m,
+		CacheCreation1hRatio:    cacheCreationRatio1h,
+		QuotaToPreConsume:       preConsumedQuota,
 	}
 	if usePrice {
 		for name, ratio := range meta.BillingRatios {
@@ -186,7 +200,8 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (types.PriceData, error) {
 	groupRatioInfo := HandleGroupRatio(c, info)
 
-	modelPrice, success := ratio_setting.GetModelPrice(info.OriginModelName, true)
+	pricingSnapshot := model.GetModelPricingRuntimeSnapshot(info.OriginModelName)
+	modelPrice, success := pricingSnapshot.ModelPrice, pricingSnapshot.HasModelPrice
 	usePrice := success
 	var modelRatio float64
 
@@ -198,7 +213,7 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (types
 		} else {
 			var ratioSuccess bool
 			var matchName string
-			modelRatio, ratioSuccess, matchName = ratio_setting.GetModelRatio(info.OriginModelName)
+			modelRatio, ratioSuccess, matchName = pricingSnapshot.ModelRatio, pricingSnapshot.HasModelRatio, pricingSnapshot.MatchedModelName
 			acceptUnsetRatio := false
 			if info.UserSetting.AcceptUnsetRatioModel {
 				acceptUnsetRatio = true
@@ -252,25 +267,21 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (types
 }
 
 func HasModelBillingConfig(modelName string) bool {
-	if _, ok := ratio_setting.GetModelPrice(modelName, false); ok {
+	pricingSnapshot := model.GetModelPricingRuntimeSnapshot(modelName)
+	if pricingSnapshot.HasModelPrice {
 		return true
 	}
-	if _, ok, _ := ratio_setting.GetModelRatio(modelName); ok {
+	if pricingSnapshot.HasModelRatio {
 		return true
 	}
-	if billing_setting.GetBillingMode(modelName) != billing_setting.BillingModeTieredExpr {
+	billingMode, billingExpr, hasBillingExpr := pricingSnapshot.BillingMode, pricingSnapshot.BillingExpr, pricingSnapshot.HasBillingExpr
+	if billingMode != billing_setting.BillingModeTieredExpr {
 		return false
 	}
-	expr, ok := billing_setting.GetBillingExpr(modelName)
-	return ok && strings.TrimSpace(expr) != ""
+	return hasBillingExpr && strings.TrimSpace(billingExpr) != ""
 }
 
-func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, promptTokens int, meta *types.TokenCountMeta, groupRatioInfo types.GroupRatioInfo) (types.PriceData, error) {
-	exprStr, ok := billing_setting.GetBillingExpr(info.OriginModelName)
-	if !ok {
-		return types.PriceData{}, fmt.Errorf("model %s is configured as tiered_expr but has no billing expression", info.OriginModelName)
-	}
-
+func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, promptTokens int, meta *types.TokenCountMeta, groupRatioInfo types.GroupRatioInfo, exprStr string) (types.PriceData, error) {
 	estimatedCompletionTokens := meta.MaxTokens
 	if estimatedCompletionTokens == 0 && groupRatioInfo.GroupRatio != 0 {
 		estimatedCompletionTokens = defaultTieredPreConsumeMaxTokens

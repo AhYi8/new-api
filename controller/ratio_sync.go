@@ -146,10 +146,7 @@ func normalizeSyncValue(field string, value any) any {
 }
 
 func getLocalPricingSyncData() map[string]any {
-	data := billing_setting.GetPricingSyncData(map[string]any(ratio_setting.GetExposedData()))
-	data["image_ratio"] = ratio_setting.GetImageRatioCopy()
-	data["audio_ratio"] = ratio_setting.GetAudioRatioCopy()
-	data["audio_completion_ratio"] = ratio_setting.GetAudioCompletionRatioCopy()
+	data := model.GetPricingSyncRuntimeData()
 	return data
 }
 

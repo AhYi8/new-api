@@ -88,6 +88,10 @@ func setupModelPricingLockTest(t *testing.T) {
 		for key, value := range oldOptionMap {
 			require.NoError(t, updateOptionMap(key, value))
 		}
+		sqlDB, dbErr := db.DB()
+		if dbErr == nil {
+			_ = sqlDB.Close()
+		}
 	})
 }
 
