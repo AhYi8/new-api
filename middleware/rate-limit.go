@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 )
 
@@ -16,6 +19,45 @@ var inMemoryRateLimiter common.InMemoryRateLimiter
 
 var defNext = func(c *gin.Context) {
 	c.Next()
+}
+
+// rootSessionRateLimitBypass 仅信任已签名会话，并校验前端携带的用户 ID，
+// 避免匿名请求仅声明 Root 用户名或伪造请求头后绕过全局 API 限流。
+func rootSessionRateLimitBypass(c *gin.Context) bool {
+	if c.GetHeader("Authorization") != "" {
+		return false
+	}
+	sessionValue, exists := c.Get(sessions.DefaultKey)
+	if !exists {
+		return false
+	}
+	session, ok := sessionValue.(sessions.Session)
+	if !ok {
+		return false
+	}
+	role, roleOk := session.Get("role").(int)
+	userID, userIDOk := session.Get("id").(int)
+	username, usernameOk := session.Get("username").(string)
+	status, statusOk := session.Get("status").(int)
+	if !roleOk || !userIDOk || !usernameOk || !statusOk ||
+		role != common.RoleRootUser || userID <= 0 || strings.TrimSpace(username) == "" ||
+		status != common.UserStatusEnabled {
+		return false
+	}
+	headerUserID, err := strconv.Atoi(c.GetHeader("New-Api-User"))
+	return err == nil && headerUserID == userID
+}
+
+// rootAuthenticatedRateLimit 包装只能放在鉴权中间件之后的限流器。
+// 登录、注册等匿名安全接口没有可信角色上下文，因此仍执行原有限流。
+func rootAuthenticatedRateLimit(limiter gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.GetInt("role") == common.RoleRootUser && c.GetInt("id") > 0 {
+			c.Next()
+			return
+		}
+		limiter(c)
+	}
 }
 
 func redisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, mark string) {
@@ -96,7 +138,14 @@ func GlobalWebRateLimit() func(c *gin.Context) {
 
 func GlobalAPIRateLimit() func(c *gin.Context) {
 	if common.GlobalApiRateLimitEnable {
-		return rateLimitFactory(common.GlobalApiRateLimitNum, common.GlobalApiRateLimitDuration, "GA")
+		limiter := rateLimitFactory(common.GlobalApiRateLimitNum, common.GlobalApiRateLimitDuration, "GA")
+		return func(c *gin.Context) {
+			if rootSessionRateLimitBypass(c) {
+				c.Next()
+				return
+			}
+			limiter(c)
+		}
 	}
 	return defNext
 }
@@ -104,6 +153,17 @@ func GlobalAPIRateLimit() func(c *gin.Context) {
 func CriticalRateLimit() func(c *gin.Context) {
 	if common.CriticalRateLimitEnable {
 		return rateLimitFactory(common.CriticalRateLimitNum, common.CriticalRateLimitDuration, "CT")
+	}
+	return defNext
+}
+
+// RootExemptCriticalRateLimit 仅供已经过 RootAuth 的明确管理路由使用。
+// 登录、二次验证、支付和用户令牌密钥读取等敏感接口必须继续使用 CriticalRateLimit。
+func RootExemptCriticalRateLimit() func(c *gin.Context) {
+	if common.CriticalRateLimitEnable {
+		return rootAuthenticatedRateLimit(
+			rateLimitFactory(common.CriticalRateLimitNum, common.CriticalRateLimitDuration, "CT"),
+		)
 	}
 	return defNext
 }
@@ -201,5 +261,7 @@ func SearchRateLimit() func(c *gin.Context) {
 	if !common.SearchRateLimitEnable {
 		return defNext
 	}
-	return userRateLimitFactory(common.SearchRateLimitNum, common.SearchRateLimitDuration, "SR")
+	return rootAuthenticatedRateLimit(
+		userRateLimitFactory(common.SearchRateLimitNum, common.SearchRateLimitDuration, "SR"),
+	)
 }

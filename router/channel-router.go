@@ -22,7 +22,7 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 
 	channelRoute.POST("/:id/key",
 		middleware.RootAuth(),
-		middleware.CriticalRateLimit(),
+		middleware.RootExemptCriticalRateLimit(),
 		middleware.DisableCache(),
 		middleware.SecureVerificationRequired(),
 		controller.GetChannelKey,
@@ -34,14 +34,14 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 	)
 	channelRoute.POST("/aggregation/prepare",
 		middleware.RootAuth(),
-		middleware.CriticalRateLimit(),
+		middleware.RootExemptCriticalRateLimit(),
 		middleware.DisableCache(),
 		middleware.SecureVerificationRequired(),
 		controller.PrepareChannelAggregation,
 	)
 	channelRoute.POST("/aggregation",
 		middleware.RootAuth(),
-		middleware.CriticalRateLimit(),
+		middleware.RootExemptCriticalRateLimit(),
 		middleware.DisableCache(),
 		middleware.SecureVerificationRequired(),
 		controller.AggregateChannels,
