@@ -123,7 +123,8 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
     setOpen('balance-query')
   }
 
-  const handleFetchModels = () => {
+  const handleFetchModels = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation()
     setCurrentRow(channel)
     setOpen('fetch-models')
   }
@@ -191,6 +192,7 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
             <Button
               variant='ghost'
               size='icon-sm'
+              className='hidden'
               onClick={handleDirectTest}
               disabled={isTesting}
               aria-label={t('Test Connection')}
@@ -204,6 +206,22 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
           )}
         </TooltipTrigger>
         <TooltipContent>{t('Test Connection')}</TooltipContent>
+      </Tooltip>
+
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              variant='ghost'
+              size='icon-sm'
+              onClick={handleFetchModels}
+              aria-label={t('Fetch Models')}
+            />
+          }
+        >
+          <Download />
+        </TooltipTrigger>
+        <TooltipContent>{t('Fetch Models')}</TooltipContent>
       </Tooltip>
 
       {layout === 'card' && (
@@ -286,14 +304,6 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
             {t('Query Balance')}
             <DropdownMenuShortcut>
               <DollarSign size={16} />
-            </DropdownMenuShortcut>
-          </DropdownMenuItem>
-
-          {/* Fetch Models */}
-          <DropdownMenuItem onClick={handleFetchModels}>
-            {t('Fetch Models')}
-            <DropdownMenuShortcut>
-              <Download size={16} />
             </DropdownMenuShortcut>
           </DropdownMenuItem>
 
