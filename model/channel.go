@@ -826,6 +826,53 @@ func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
 	return false
 }
 
+// ReconcileAutoDisabledMultiKeyChannel 修复多密钥渠道顶层状态与实际密钥状态不一致的问题。
+// 锁内只恢复自动禁用渠道，确保人工禁用始终具有最高优先级。
+func ReconcileAutoDisabledMultiKeyChannel(channelID int) (bool, error) {
+	pollingLock := GetChannelPollingLock(channelID)
+	pollingLock.Lock()
+	defer pollingLock.Unlock()
+
+	reconciled := false
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var channel Channel
+		if err := lockForUpdate(tx).Where("id = ?", channelID).First(&channel).Error; err != nil {
+			return err
+		}
+		if !channel.ChannelInfo.IsMultiKey || channel.Status != common.ChannelStatusAutoDisabled {
+			return nil
+		}
+
+		keys := channel.GetKeys()
+		if len(keys) == 0 || !hasEnabledMultiKey(keys, channel.ChannelInfo.MultiKeyStatusList) {
+			return nil
+		}
+
+		info := channel.GetOtherInfo()
+		delete(info, "status_reason")
+		delete(info, "status_time")
+		channel.SetOtherInfo(info)
+
+		if err := tx.Model(&Channel{}).Where("id = ?", channelID).Updates(map[string]any{
+			"status":     common.ChannelStatusEnabled,
+			"other_info": channel.OtherInfo,
+		}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&Ability{}).Where("channel_id = ?", channelID).
+			Select("enabled").Update("enabled", true).Error; err != nil {
+			return err
+		}
+
+		reconciled = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return reconciled, nil
+}
+
 // MultiKeyRecoveryResult 描述一次多密钥健康检查写回的结果。
 type MultiKeyRecoveryResult struct {
 	Recovered      int

@@ -503,6 +503,78 @@ func TestPerformAutoDisabledMultiKeyTestsSkipsCandidateAfterManualDisable(t *tes
 	require.False(t, cacheChanged)
 }
 
+func TestReconcileAutoDisabledMultiKeyChannelsUsesLatestDatabaseState(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	originalAutomaticEnable := common.AutomaticEnableChannelEnabled
+	common.AutomaticEnableChannelEnabled = true
+	t.Cleanup(func() { common.AutomaticEnableChannelEnabled = originalAutomaticEnable })
+
+	channel := &model.Channel{
+		Name:   "stale-channel-snapshot",
+		Status: common.ChannelStatusAutoDisabled,
+		Key:    "key-1",
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey:         true,
+			MultiKeyStatusList: map[int]int{0: common.ChannelStatusAutoDisabled},
+		},
+	}
+	require.NoError(t, db.Create(channel).Error)
+	require.NoError(t, db.Create(&model.Ability{ChannelId: channel.Id, Enabled: false}).Error)
+
+	latestInfo := channel.ChannelInfo
+	latestInfo.MultiKeyStatusList = nil
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", channel.Id).
+		Update("channel_info", latestInfo).Error)
+
+	enabled := reconcileAutoDisabledMultiKeyChannels(context.Background(), []*model.Channel{channel})
+
+	require.Equal(t, 1, enabled)
+	stored, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+	var ability model.Ability
+	require.NoError(t, db.Where("channel_id = ?", channel.Id).First(&ability).Error)
+	assert.True(t, ability.Enabled)
+}
+
+func TestReconcileAutoDisabledMultiKeyChannelsCountsRepairsAndRespectsSwitch(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	originalAutomaticEnable := common.AutomaticEnableChannelEnabled
+	t.Cleanup(func() { common.AutomaticEnableChannelEnabled = originalAutomaticEnable })
+
+	channels := []*model.Channel{
+		{Name: "first", Status: common.ChannelStatusAutoDisabled, Key: "key-1", ChannelInfo: model.ChannelInfo{IsMultiKey: true}},
+		{Name: "second", Status: common.ChannelStatusAutoDisabled, Key: "key-2\nkey-3", ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeyStatusList: map[int]int{0: common.ChannelStatusAutoDisabled}}},
+		{Name: "all-disabled", Status: common.ChannelStatusAutoDisabled, Key: "key-4", ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeyStatusList: map[int]int{0: common.ChannelStatusAutoDisabled}}},
+		{Name: "manual", Status: common.ChannelStatusManuallyDisabled, Key: "key-5", ChannelInfo: model.ChannelInfo{IsMultiKey: true}},
+	}
+	for _, channel := range channels {
+		require.NoError(t, db.Create(channel).Error)
+	}
+
+	common.AutomaticEnableChannelEnabled = false
+	assert.Zero(t, reconcileAutoDisabledMultiKeyChannels(context.Background(), channels))
+	for _, channel := range channels {
+		stored, err := model.GetChannelById(channel.Id, true)
+		require.NoError(t, err)
+		assert.Equal(t, channel.Status, stored.Status)
+	}
+
+	common.AutomaticEnableChannelEnabled = true
+	assert.Equal(t, 2, reconcileAutoDisabledMultiKeyChannels(context.Background(), channels))
+	assert.Zero(t, reconcileAutoDisabledMultiKeyChannels(context.Background(), channels))
+
+	for index, channel := range channels {
+		stored, err := model.GetChannelById(channel.Id, true)
+		require.NoError(t, err)
+		if index < 2 {
+			assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+			continue
+		}
+		assert.Equal(t, channel.Status, stored.Status)
+	}
+}
+
 func TestTestAllChannelsRejectsExistingActiveTask(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
 	require.NoError(t, db.AutoMigrate(&model.SystemTask{}, &model.SystemTaskLock{}))

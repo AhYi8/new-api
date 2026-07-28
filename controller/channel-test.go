@@ -1068,6 +1068,37 @@ func performAutoDisabledMultiKeyTestsWithTester(ctx context.Context, channels []
 	return summary, cacheChanged
 }
 
+// reconcileAutoDisabledMultiKeyChannels 在密钥健康检查后协调多密钥渠道的顶层状态。
+// 候选列表可能是测试前的快照，因此只做宽松预筛，最终状态必须由模型层锁内复核。
+func reconcileAutoDisabledMultiKeyChannels(ctx context.Context, channels []*model.Channel) int {
+	if !common.AutomaticEnableChannelEnabled {
+		return 0
+	}
+
+	enabled := 0
+	for _, channel := range channels {
+		if ctx != nil && ctx.Err() != nil {
+			break
+		}
+		if channel == nil || !channel.ChannelInfo.IsMultiKey || channel.Status != common.ChannelStatusAutoDisabled {
+			continue
+		}
+
+		reconciled, err := model.ReconcileAutoDisabledMultiKeyChannel(channel.Id)
+		if err != nil {
+			common.SysLog(fmt.Sprintf("协调多密钥渠道状态失败：channel_id=%d, error=%v", channel.Id, err))
+			continue
+		}
+		if !reconciled {
+			continue
+		}
+
+		enabled++
+		service.NotifyChannelEnabled(channel.Id, channel.Name)
+	}
+	return enabled
+}
+
 // performChannelTests runs the channel test loop synchronously, honoring ctx
 // cancellation so a system-task runner that loses its lease stops promptly. When
 // report is non-nil it is called after each channel with (processed, total) so
@@ -1216,6 +1247,9 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, report fu
 		summary.KeyFailed += keySummary.KeyFailed
 		summary.KeyRecovered += keySummary.KeyRecovered
 		cacheChanged = cacheChanged || keyCacheChanged
+		reconciled := reconcileAutoDisabledMultiKeyChannels(ctx, channels)
+		summary.Enabled += reconciled
+		cacheChanged = cacheChanged || reconciled > 0
 		if report != nil && (ctx == nil || ctx.Err() == nil) {
 			report(1000, 1000)
 		}

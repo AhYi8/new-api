@@ -187,6 +187,31 @@ func TestRebuildMultiKeyStatusPreservesExistingKeyState(t *testing.T) {
 	assert.NotContains(t, updated.MultiKeyStatusList, 2)
 }
 
+func TestRebuildMultiKeyStatusDoesNotChangeDuplicateExistingKey(t *testing.T) {
+	channel := model.Channel{
+		Status: common.ChannelStatusAutoDisabled,
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey:                 true,
+			MultiKeySize:               1,
+			MultiKeyPollingIndex:       0,
+			MultiKeyTestIndex:          0,
+			MultiKeyGenerationCounter:  9,
+			MultiKeyStatusList:         map[int]int{0: common.ChannelStatusAutoDisabled},
+			MultiKeyDisabledReason:     map[int]string{0: "status_code=401, disabled"},
+			MultiKeyDisabledTime:       map[int]int64{0: 123456},
+			MultiKeyDisabledStatusCode: map[int]int{0: 401},
+			MultiKeyDisabledGeneration: map[int]int64{0: 7},
+		},
+	}
+	originInfo := channel.ChannelInfo
+
+	channel.ChannelInfo = rebuildMultiKeyStatus(originInfo, "existing-key", "existing-key", "append")
+
+	assert.Equal(t, common.ChannelStatusAutoDisabled, channel.Status)
+	assert.Equal(t, originInfo, channel.ChannelInfo)
+	assert.Equal(t, 1, channel.ChannelInfo.MultiKeySize)
+}
+
 func TestRebuildMultiKeyStatusTreatsReplaceAsNewKeys(t *testing.T) {
 	originInfo := model.ChannelInfo{
 		IsMultiKey:           true,

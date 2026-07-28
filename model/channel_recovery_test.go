@@ -369,6 +369,125 @@ func TestRecoverAutoDisabledMultiKeysDoesNotOverrideManualChannelDisable(t *test
 	assert.Equal(t, common.ChannelStatusAutoDisabled, updated.ChannelInfo.MultiKeyStatusList[0])
 }
 
+func TestReconcileAutoDisabledMultiKeyChannel(t *testing.T) {
+	tests := []struct {
+		name       string
+		key        string
+		status     int
+		isMultiKey bool
+		statusList map[int]int
+		expected   bool
+	}{
+		{
+			name:       "全部密钥启用时恢复",
+			key:        "key-1\nkey-2",
+			status:     common.ChannelStatusAutoDisabled,
+			isMultiKey: true,
+			expected:   true,
+		},
+		{
+			name:       "部分密钥启用时恢复",
+			key:        "key-1\nkey-2",
+			status:     common.ChannelStatusAutoDisabled,
+			isMultiKey: true,
+			statusList: map[int]int{0: common.ChannelStatusAutoDisabled},
+			expected:   true,
+		},
+		{
+			name:       "全部密钥禁用时不恢复",
+			key:        "key-1\nkey-2",
+			status:     common.ChannelStatusAutoDisabled,
+			isMultiKey: true,
+			statusList: map[int]int{
+				0: common.ChannelStatusAutoDisabled,
+				1: common.ChannelStatusManuallyDisabled,
+			},
+		},
+		{
+			name:       "手动禁用渠道不恢复",
+			key:        "key-1",
+			status:     common.ChannelStatusManuallyDisabled,
+			isMultiKey: true,
+		},
+		{
+			name:       "已启用渠道保持不变",
+			key:        "key-1",
+			status:     common.ChannelStatusEnabled,
+			isMultiKey: true,
+		},
+		{
+			name:       "空密钥渠道保持不变",
+			status:     common.ChannelStatusAutoDisabled,
+			isMultiKey: true,
+		},
+		{
+			name:       "单密钥渠道保持不变",
+			key:        "key-1",
+			status:     common.ChannelStatusAutoDisabled,
+			isMultiKey: false,
+		},
+		{
+			name:       "越界状态不影响实际密钥判断",
+			key:        "key-1",
+			status:     common.ChannelStatusAutoDisabled,
+			isMultiKey: true,
+			statusList: map[int]int{1: common.ChannelStatusAutoDisabled},
+			expected:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			truncateTables(t)
+			channel := &Channel{
+				Name:      tt.name,
+				Key:       tt.key,
+				Status:    tt.status,
+				Group:     "default",
+				Models:    "gpt-4o-mini",
+				OtherInfo: `{"status_reason":"All keys are disabled","status_time":123,"keep":"value"}`,
+				ChannelInfo: ChannelInfo{
+					IsMultiKey:         tt.isMultiKey,
+					MultiKeyStatusList: tt.statusList,
+				},
+			}
+			require.NoError(t, DB.Create(channel).Error)
+			require.NoError(t, DB.Create(&Ability{
+				Group:     "default",
+				Model:     "gpt-4o-mini",
+				ChannelId: channel.Id,
+				Enabled:   false,
+			}).Error)
+
+			reconciled, err := ReconcileAutoDisabledMultiKeyChannel(channel.Id)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, reconciled)
+
+			stored, err := GetChannelById(channel.Id, true)
+			require.NoError(t, err)
+			var ability Ability
+			require.NoError(t, DB.Where("channel_id = ?", channel.Id).First(&ability).Error)
+			if tt.expected {
+				assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+				assert.True(t, ability.Enabled)
+				otherInfo := stored.GetOtherInfo()
+				assert.NotContains(t, otherInfo, "status_reason")
+				assert.NotContains(t, otherInfo, "status_time")
+				assert.Equal(t, "value", otherInfo["keep"])
+
+				reconciled, err = ReconcileAutoDisabledMultiKeyChannel(channel.Id)
+				require.NoError(t, err)
+				assert.False(t, reconciled)
+				return
+			}
+
+			assert.Equal(t, tt.status, stored.Status)
+			assert.False(t, ability.Enabled)
+			assert.Contains(t, stored.GetOtherInfo(), "status_reason")
+		})
+	}
+}
+
 func TestEnabledChannelCanBeReaddedWithOneCallerCacheRefresh(t *testing.T) {
 	truncateTables(t)
 
