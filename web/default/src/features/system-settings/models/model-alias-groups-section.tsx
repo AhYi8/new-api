@@ -6,6 +6,8 @@ it under the terms of the GNU Affero General Public License as
 published by the Free Software Foundation, either version 3 of the
 License, or (at your option) any later version.
 */
+import { Cancel01Icon, ListTreeIcon } from '@hugeicons/core-free-icons'
+import { HugeiconsIcon } from '@hugeicons/react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Eye, Pencil, Plus, Trash2, WandSparkles } from 'lucide-react'
 import { useRef, useState } from 'react'
@@ -46,6 +48,7 @@ import type {
   ModelAliasGroup,
   ModelAliasPreview as ModelAliasPreviewData,
 } from '../types'
+import { ModelAliasChannelMatches } from './model-alias-channel-matches'
 import { ModelAliasGroupEditor } from './model-alias-group-editor'
 import { ModelAliasPreview } from './model-alias-preview'
 
@@ -66,6 +69,10 @@ export function ModelAliasGroupsSection() {
   const [editorOpen, setEditorOpen] = useState(false)
   const [editingGroup, setEditingGroup] = useState<ModelAliasGroup | null>(null)
   const [preview, setPreview] = useState<ModelAliasPreviewData | null>(null)
+  const [activeDetail, setActiveDetail] = useState<{
+    alias: string
+    type: 'preview' | 'channels'
+  } | null>(null)
   const [applyAlias, setApplyAlias] = useState<string | null>(null)
   const [selectedPreviewChannelIds, setSelectedPreviewChannelIds] = useState<
     number[]
@@ -186,7 +193,10 @@ export function ModelAliasGroupsSection() {
             index === existingIndex ? nextGroup : group
           )
     const saved = await persistConfiguration(nextGroups)
-    if (saved) setPreview(null)
+    if (saved) {
+      setPreview(null)
+      setActiveDetail(null)
+    }
     return saved
   }
 
@@ -195,7 +205,17 @@ export function ModelAliasGroupsSection() {
   }
 
   const handlePreview = (alias: string) => {
+    setActiveDetail({ alias, type: 'preview' })
     previewMutation.mutate(alias)
+  }
+
+  const handleChannels = (alias: string) => {
+    setPreview(null)
+    setActiveDetail((current) =>
+      current?.type === 'channels' && current.alias === alias
+        ? null
+        : { alias, type: 'channels' }
+    )
   }
 
   const handleTargetModelChange = (channelId: number, target: string) => {
@@ -283,6 +303,7 @@ export function ModelAliasGroupsSection() {
     ) {
       setDeleteAlias(null)
       if (preview?.alias === alias) setPreview(null)
+      if (activeDetail?.alias === alias) setActiveDetail(null)
     }
   }
 
@@ -327,7 +348,7 @@ export function ModelAliasGroupsSection() {
     {
       id: 'actions',
       header: t('Actions'),
-      className: 'w-48',
+      className: 'w-56',
       cell: (group: ModelAliasGroup) => {
         const pendingCount = group.pending_count
         const previewLabel =
@@ -337,10 +358,19 @@ export function ModelAliasGroupsSection() {
         return (
           <div className='flex items-center gap-1'>
             <Button
-              variant='ghost'
+              variant={
+                activeDetail?.type === 'preview' &&
+                activeDetail.alias === group.alias
+                  ? 'secondary'
+                  : 'ghost'
+              }
               size='icon-sm'
               className='relative'
               aria-label={previewLabel}
+              aria-pressed={
+                activeDetail?.type === 'preview' &&
+                activeDetail.alias === group.alias
+              }
               onClick={() => handlePreview(group.alias)}
               disabled={previewMutation.isPending || saveMutation.isPending}
             >
@@ -351,6 +381,24 @@ export function ModelAliasGroupsSection() {
                   aria-hidden='true'
                 />
               ) : null}
+            </Button>
+            <Button
+              variant={
+                activeDetail?.type === 'channels' &&
+                activeDetail.alias === group.alias
+                  ? 'secondary'
+                  : 'ghost'
+              }
+              size='icon-sm'
+              aria-label={t('View matching channel models')}
+              aria-pressed={
+                activeDetail?.type === 'channels' &&
+                activeDetail.alias === group.alias
+              }
+              onClick={() => handleChannels(group.alias)}
+              disabled={saveMutation.isPending}
+            >
+              <HugeiconsIcon icon={ListTreeIcon} strokeWidth={2} />
             </Button>
             <Button
               variant='ghost'
@@ -506,7 +554,8 @@ export function ModelAliasGroupsSection() {
         />
       )}
 
-      {preview ? (
+      {activeDetail?.type === 'preview' &&
+      preview?.alias === activeDetail.alias ? (
         <>
           <Separator />
           <div className='flex min-w-0 flex-col gap-4'>
@@ -539,6 +588,40 @@ export function ModelAliasGroupsSection() {
               targetModels={selectedTargetModels}
               onSelectedChannelIdsChange={setSelectedPreviewChannelIds}
               onTargetModelChange={handleTargetModelChange}
+            />
+          </div>
+        </>
+      ) : null}
+
+      {activeDetail?.type === 'channels' ? (
+        <>
+          <Separator />
+          <div className='flex min-w-0 flex-col gap-4'>
+            <div className='flex flex-wrap items-start justify-between gap-2'>
+              <div>
+                <h3 className='text-base font-semibold'>
+                  {t('Matching channel models for {{alias}}', {
+                    alias: activeDetail.alias,
+                  })}
+                </h3>
+                <p className='text-muted-foreground text-xs'>
+                  {t(
+                    'Only exact, case-sensitive matches in model lists, mapping keys, or mapping values are shown.'
+                  )}
+                </p>
+              </div>
+              <Button
+                variant='ghost'
+                size='icon-sm'
+                aria-label={t('Close')}
+                onClick={() => setActiveDetail(null)}
+              >
+                <HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} />
+              </Button>
+            </div>
+            <ModelAliasChannelMatches
+              key={activeDetail.alias}
+              alias={activeDetail.alias}
             />
           </div>
         </>

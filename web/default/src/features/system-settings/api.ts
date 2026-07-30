@@ -29,6 +29,7 @@ import type {
   ModelAliasApplyRequest,
   ModelAliasApplyResponse,
   ModelAliasCatalogResponse,
+  ModelAliasChannelMatchesResponse,
   ModelAliasGroup,
   ModelAliasGroupsResponse,
   ModelAliasPreviewResponse,
@@ -36,6 +37,8 @@ import type {
   SystemOptionsResponse,
   SystemTaskListResponse,
   SystemTaskResponse,
+  RemoveModelAliasChannelModelRequest,
+  RemoveModelAliasChannelModelResponse,
   UpdateOptionRequest,
   UpdateOptionResponse,
   UpstreamChannelsResponse,
@@ -109,6 +112,31 @@ export async function previewModelAliasGroup(alias: string) {
   return assertSuccessfulResponse(
     res.data,
     i18next.t('Failed to preview model alias group')
+  )
+}
+
+export async function getModelAliasGroupChannels(alias: string) {
+  const res = await api.get<ModelAliasChannelMatchesResponse>(
+    '/api/option/model-alias-groups/channels',
+    { params: { alias } }
+  )
+  return assertSuccessfulResponse(
+    res.data,
+    i18next.t('Failed to load matching channel models')
+  )
+}
+
+export async function removeModelAliasChannelModel(
+  channelId: number,
+  request: RemoveModelAliasChannelModelRequest
+) {
+  const res = await api.delete<RemoveModelAliasChannelModelResponse>(
+    `/api/option/model-alias-groups/channels/${channelId}/models`,
+    { data: request }
+  )
+  return assertSuccessfulResponse(
+    res.data,
+    i18next.t('Failed to remove channel model')
   )
 }
 

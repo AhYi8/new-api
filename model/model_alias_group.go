@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sort"
@@ -87,6 +88,49 @@ type ModelAliasApplyResult struct {
 type ModelAliasApplySelection struct {
 	SelectedChannelIDs []int
 	TargetModels       map[int]string
+}
+
+type ModelAliasChannelMatchSource string
+
+const (
+	ModelAliasChannelMatchSourceModels       ModelAliasChannelMatchSource = "models"
+	ModelAliasChannelMatchSourceMappingKey   ModelAliasChannelMatchSource = "mapping_key"
+	ModelAliasChannelMatchSourceMappingValue ModelAliasChannelMatchSource = "mapping_value"
+)
+
+type ModelAliasChannelRemovalPlan struct {
+	RemovedModels      []string `json:"removed_models"`
+	RemovedMappingKeys []string `json:"removed_mapping_keys"`
+	RequiresConfirm    bool     `json:"requires_confirm"`
+}
+
+type ModelAliasChannelMatchedModel struct {
+	Name        string                         `json:"name"`
+	Sources     []ModelAliasChannelMatchSource `json:"sources"`
+	RemovalPlan ModelAliasChannelRemovalPlan   `json:"removal_plan"`
+}
+
+type ModelAliasChannelMatch struct {
+	ChannelID     int                             `json:"channel_id"`
+	ChannelName   string                          `json:"channel_name"`
+	ChannelStatus int                             `json:"channel_status"`
+	Revision      string                          `json:"revision"`
+	MappingError  string                          `json:"mapping_error,omitempty"`
+	MatchedModels []ModelAliasChannelMatchedModel `json:"matched_models"`
+}
+
+type ModelAliasChannelMatches struct {
+	Alias string                   `json:"alias"`
+	Items []ModelAliasChannelMatch `json:"items"`
+}
+
+type ModelAliasChannelRemovalResult struct {
+	ChannelID          int      `json:"channel_id"`
+	ChannelName        string   `json:"channel_name"`
+	RequestedModel     string   `json:"requested_model"`
+	RemovedModels      []string `json:"removed_models"`
+	RemovedMappingKeys []string `json:"removed_mapping_keys"`
+	AffectedAliases    []string `json:"-"`
 }
 
 // ModelAliasPriceSyncSkip 记录定时同步因主模型缺少可用价格而跳过的别名组。
@@ -531,6 +575,164 @@ func PreviewModelAliasGroup(alias string) (*ModelAliasPreview, error) {
 		return nil, err
 	}
 	return buildModelAliasPreview(group, channels), nil
+}
+
+func ListModelAliasGroupChannels(alias string) (*ModelAliasChannelMatches, error) {
+	group, err := getModelAliasGroup(alias)
+	if err != nil {
+		return nil, err
+	}
+	channels, err := getChannelsForModelAlias()
+	if err != nil {
+		return nil, err
+	}
+
+	result := &ModelAliasChannelMatches{
+		Alias: group.Alias,
+		Items: make([]ModelAliasChannelMatch, 0),
+	}
+	for _, channel := range channels {
+		item, matched := buildModelAliasChannelMatch(group, channel)
+		if matched {
+			result.Items = append(result.Items, item)
+		}
+	}
+	return result, nil
+}
+
+func RemoveModelAliasChannelModel(alias string, channelID int, modelName string, revision string, allowCascade bool) (*ModelAliasChannelRemovalResult, error) {
+	alias = strings.TrimSpace(alias)
+	modelName = strings.TrimSpace(modelName)
+	revision = strings.TrimSpace(revision)
+	if channelID <= 0 {
+		return nil, errors.New("渠道 ID 无效")
+	}
+	if err := validateModelAliasName(alias, "统一名称"); err != nil {
+		return nil, err
+	}
+	if err := validateModelAliasName(modelName, "模型名称"); err != nil {
+		return nil, err
+	}
+	if len(revision) != sha256.Size*2 || strings.Trim(revision, "0123456789abcdef") != "" {
+		return nil, errors.New("渠道配置版本无效")
+	}
+
+	result := &ModelAliasChannelRemovalResult{}
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		// 别名配置和渠道必须在同一事务内锁定，避免多实例并发修改后按旧归属删除模型。
+		options, err := getOptionsForUpdate(tx, []string{ModelAliasGroupsOptionKey})
+		if err != nil {
+			return err
+		}
+		groups, err := parseModelAliasGroups(options[ModelAliasGroupsOptionKey].Value)
+		if err != nil {
+			return err
+		}
+		var group *ModelAliasGroup
+		for index := range groups {
+			if groups[index].Alias == alias {
+				group = &groups[index]
+				break
+			}
+		}
+		if group == nil {
+			return fmt.Errorf("模型别名组 %q 不存在", alias)
+		}
+		if modelName != group.Alias && !containsExactModel(group.Models, modelName) {
+			return fmt.Errorf("模型名称 %q 不属于别名组 %q", modelName, alias)
+		}
+
+		var channel Channel
+		if err := lockForUpdate(tx).Where("id = ?", channelID).First(&channel).Error; err != nil {
+			return err
+		}
+		if modelAliasChannelRevision(&channel) != revision {
+			return errors.New("渠道配置已变化，请刷新后重试")
+		}
+
+		mapping, err := parseModelAliasChannelMapping(channel.ModelMapping)
+		if err != nil {
+			return errors.New("渠道模型映射格式无效，请先在渠道设置中修复")
+		}
+		rawModels := channel.GetModels()
+		models := normalizeModelAliasChannelModels(rawModels)
+		if !modelAliasNameExists(models, mapping, modelName) {
+			return fmt.Errorf("渠道 %d 中不存在模型名称 %q", channelID, modelName)
+		}
+		plan := planModelAliasChannelRemoval(models, mapping, modelName)
+		if plan.RequiresConfirm && !allowCascade {
+			return errors.New("删除会同时影响模型映射，请确认后重试")
+		}
+
+		removedModelSet := make(map[string]struct{}, len(plan.RemovedModels))
+		for _, removedModel := range plan.RemovedModels {
+			removedModelSet[removedModel] = struct{}{}
+		}
+		remainingModels := make([]string, 0, len(rawModels))
+		for _, currentModel := range rawModels {
+			trimmedModel := strings.TrimSpace(currentModel)
+			if trimmedModel == "" {
+				continue
+			}
+			if _, removed := removedModelSet[trimmedModel]; !removed {
+				remainingModels = append(remainingModels, currentModel)
+			}
+		}
+
+		removedMappingSet := make(map[string]struct{}, len(plan.RemovedMappingKeys))
+		for _, mappingKey := range plan.RemovedMappingKeys {
+			removedMappingSet[mappingKey] = struct{}{}
+		}
+		remainingMapping := make(map[string]string, len(mapping)-len(plan.RemovedMappingKeys))
+		for key, value := range mapping {
+			if _, removed := removedMappingSet[key]; !removed {
+				remainingMapping[key] = value
+			}
+		}
+
+		updates := map[string]any{}
+		if len(plan.RemovedModels) > 0 {
+			channel.Models = strings.Join(remainingModels, ",")
+			updates["models"] = channel.Models
+		}
+		if len(plan.RemovedMappingKeys) > 0 {
+			mappingData, marshalErr := common.Marshal(remainingMapping)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			mappingText := string(mappingData)
+			channel.ModelMapping = &mappingText
+			updates["model_mapping"] = mappingText
+		}
+		if err = tx.Model(&Channel{}).Where("id = ?", channel.Id).Updates(updates).Error; err != nil {
+			return err
+		}
+		if len(plan.RemovedModels) > 0 {
+			if channel.Models == "" {
+				if err = tx.Where("channel_id = ?", channel.Id).Delete(&Ability{}).Error; err != nil {
+					return err
+				}
+			} else if err = channel.UpdateAbilities(tx); err != nil {
+				return err
+			}
+		}
+
+		result.ChannelID = channel.Id
+		result.ChannelName = channel.Name
+		result.RequestedModel = modelName
+		result.RemovedModels = plan.RemovedModels
+		result.RemovedMappingKeys = plan.RemovedMappingKeys
+		result.AffectedAliases = affectedModelAliasGroups(groups, plan)
+		if !containsExactModel(result.AffectedAliases, alias) {
+			result.AffectedAliases = append(result.AffectedAliases, alias)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	InitChannelCache()
+	return result, nil
 }
 
 func ApplyModelAliasGroup(alias string) (*ModelAliasApplyResult, error) {
@@ -1053,6 +1255,142 @@ func parseModelAliasChannelMapping(raw *string) (map[string]string, error) {
 		return nil, errors.New("模型映射必须是 JSON 对象")
 	}
 	return mapping, nil
+}
+
+func buildModelAliasChannelMatch(group ModelAliasGroup, channel *Channel) (ModelAliasChannelMatch, bool) {
+	item := ModelAliasChannelMatch{
+		ChannelID:     channel.Id,
+		ChannelName:   channel.Name,
+		ChannelStatus: channel.Status,
+		Revision:      modelAliasChannelRevision(channel),
+		MatchedModels: make([]ModelAliasChannelMatchedModel, 0),
+	}
+	models := normalizeModelAliasChannelModels(channel.GetModels())
+	mapping, err := parseModelAliasChannelMapping(channel.ModelMapping)
+	if err != nil {
+		item.MappingError = "invalid_mapping"
+		mapping = nil
+	}
+
+	candidates := make([]string, 0, len(group.Models)+1)
+	candidates = append(candidates, group.Alias)
+	candidates = append(candidates, group.Models...)
+	for _, candidate := range candidates {
+		sources := make([]ModelAliasChannelMatchSource, 0, 3)
+		if containsExactModel(models, candidate) {
+			sources = append(sources, ModelAliasChannelMatchSourceModels)
+		}
+		if mapping != nil {
+			if _, exists := mapping[candidate]; exists {
+				sources = append(sources, ModelAliasChannelMatchSourceMappingKey)
+			}
+			for _, target := range mapping {
+				if target == candidate {
+					sources = append(sources, ModelAliasChannelMatchSourceMappingValue)
+					break
+				}
+			}
+		}
+		if len(sources) == 0 {
+			continue
+		}
+		matched := ModelAliasChannelMatchedModel{Name: candidate, Sources: sources}
+		if mapping != nil {
+			matched.RemovalPlan = planModelAliasChannelRemoval(models, mapping, candidate)
+		}
+		item.MatchedModels = append(item.MatchedModels, matched)
+	}
+	return item, len(item.MatchedModels) > 0
+}
+
+func planModelAliasChannelRemoval(models []string, mapping map[string]string, modelName string) ModelAliasChannelRemovalPlan {
+	removedNames := map[string]struct{}{modelName: {}}
+	removedMappingKeys := make(map[string]struct{})
+	for {
+		changed := false
+		for key, value := range mapping {
+			if _, removed := removedMappingKeys[key]; removed {
+				continue
+			}
+			_, keyRemoved := removedNames[key]
+			_, valueRemoved := removedNames[value]
+			if !keyRemoved && !valueRemoved {
+				continue
+			}
+			removedMappingKeys[key] = struct{}{}
+			if _, exists := removedNames[key]; !exists {
+				removedNames[key] = struct{}{}
+			}
+			changed = true
+		}
+		if !changed {
+			break
+		}
+	}
+
+	removedModels := make([]string, 0)
+	for _, currentModel := range models {
+		if _, removed := removedNames[currentModel]; removed {
+			removedModels = append(removedModels, currentModel)
+		}
+	}
+	removedKeys := make([]string, 0, len(removedMappingKeys))
+	for key := range removedMappingKeys {
+		removedKeys = append(removedKeys, key)
+	}
+	sort.Strings(removedKeys)
+	return ModelAliasChannelRemovalPlan{
+		RemovedModels:      removedModels,
+		RemovedMappingKeys: removedKeys,
+		RequiresConfirm:    len(removedKeys) > 0 || len(removedModels) > 1,
+	}
+}
+
+func modelAliasNameExists(models []string, mapping map[string]string, modelName string) bool {
+	if containsExactModel(models, modelName) {
+		return true
+	}
+	if _, exists := mapping[modelName]; exists {
+		return true
+	}
+	for _, target := range mapping {
+		if target == modelName {
+			return true
+		}
+	}
+	return false
+}
+
+func modelAliasChannelRevision(channel *Channel) string {
+	mapping := ""
+	if channel.ModelMapping != nil {
+		mapping = *channel.ModelMapping
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(channel.Models+"\x00"+mapping)))
+}
+
+func affectedModelAliasGroups(groups []ModelAliasGroup, plan ModelAliasChannelRemovalPlan) []string {
+	affectedNames := make(map[string]struct{}, len(plan.RemovedModels)+len(plan.RemovedMappingKeys))
+	for _, name := range plan.RemovedModels {
+		affectedNames[name] = struct{}{}
+	}
+	for _, name := range plan.RemovedMappingKeys {
+		affectedNames[name] = struct{}{}
+	}
+	affectedAliases := make([]string, 0)
+	for _, group := range groups {
+		if _, affected := affectedNames[group.Alias]; affected {
+			affectedAliases = append(affectedAliases, group.Alias)
+			continue
+		}
+		for _, providerModel := range group.Models {
+			if _, affected := affectedNames[providerModel]; affected {
+				affectedAliases = append(affectedAliases, group.Alias)
+				break
+			}
+		}
+	}
+	return affectedAliases
 }
 
 func normalizeModelAliasChannelModels(models []string) []string {

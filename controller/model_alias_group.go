@@ -2,6 +2,7 @@ package controller
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -22,6 +23,13 @@ type modelAliasGroupRequest struct {
 	TargetModels       map[int]string `json:"target_models"`
 }
 
+type removeModelAliasChannelModelRequest struct {
+	Alias        string `json:"alias"`
+	ModelName    string `json:"model_name"`
+	Revision     string `json:"revision"`
+	AllowCascade bool   `json:"allow_cascade"`
+}
+
 func GetModelAliasGroups(c *gin.Context) {
 	configuration, err := model.GetModelAliasConfiguration()
 	if err != nil {
@@ -38,6 +46,15 @@ func SearchModelAliasCatalog(c *gin.Context) {
 		return
 	}
 	common.ApiSuccess(c, gin.H{"models": models})
+}
+
+func ListModelAliasGroupChannels(c *gin.Context) {
+	result, err := model.ListModelAliasGroupChannels(c.Query("alias"))
+	if err != nil {
+		common.ApiErrorMsg(c, err.Error())
+		return
+	}
+	common.ApiSuccess(c, result)
 }
 
 func UpdateModelAliasGroups(c *gin.Context) {
@@ -110,6 +127,45 @@ func ApplyModelAliasGroup(c *gin.Context) {
 		"failed_count":  len(result.Failed),
 	})
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": result})
+}
+
+func RemoveModelAliasChannelModel(c *gin.Context) {
+	channelID, err := strconv.Atoi(c.Param("channel_id"))
+	if err != nil || channelID <= 0 {
+		common.ApiErrorMsg(c, "渠道 ID 无效")
+		return
+	}
+	var request removeModelAliasChannelModelRequest
+	if err = common.DecodeJson(c.Request.Body, &request); err != nil {
+		common.ApiErrorMsg(c, "无效的渠道模型删除参数")
+		return
+	}
+	result, err := model.RemoveModelAliasChannelModel(
+		request.Alias,
+		channelID,
+		request.ModelName,
+		request.Revision,
+		request.AllowCascade,
+	)
+	if err != nil {
+		common.ApiErrorMsg(c, err.Error())
+		return
+	}
+	for _, affectedAlias := range result.AffectedAliases {
+		if invalidateErr := model.InvalidateModelAliasPendingCount(affectedAlias); invalidateErr != nil {
+			common.SysLog("模型别名待处理数量失效失败: " + invalidateErr.Error())
+		}
+	}
+	requestModelAliasScan()
+	recordManageAudit(c, "model_alias_group.channel_model.remove", map[string]interface{}{
+		"alias":                strings.TrimSpace(request.Alias),
+		"channel_id":           result.ChannelID,
+		"channel_name":         result.ChannelName,
+		"requested_model":      result.RequestedModel,
+		"removed_models":       result.RemovedModels,
+		"removed_mapping_keys": result.RemovedMappingKeys,
+	})
+	common.ApiSuccess(c, result)
 }
 
 func requestModelAliasScan() {

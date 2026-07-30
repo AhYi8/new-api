@@ -168,6 +168,291 @@ func TestClassifyModelAliasChannelRejectsMappingCycle(t *testing.T) {
 	assert.Equal(t, "mapping_target_conflict", item.Reason)
 }
 
+func TestListModelAliasGroupChannelsMatchesModelsAndMappingSources(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	_, err := SaveModelAliasGroups([]ModelAliasGroup{
+		{Alias: "alias-a", Models: []string{"provider-a"}},
+	})
+	require.NoError(t, err)
+
+	channels := []*Channel{
+		newModelAliasTestChannel("全部来源", "alias-a,provider-a", map[string]string{"alias-a": "provider-a"}),
+		newModelAliasTestChannel("仅映射", "other", map[string]string{"alias-a": "provider-a"}),
+		newModelAliasTestChannel("大小写不同", "Alias-A,Provider-A", map[string]string{"Alias-A": "Provider-A"}),
+		newModelAliasTestChannelWithRawMapping("无效映射", "provider-a", "{"),
+		newModelAliasTestChannel("无关渠道", "other", map[string]string{"other": "target"}),
+	}
+	for _, channel := range channels {
+		require.NoError(t, DB.Create(channel).Error)
+	}
+
+	result, err := ListModelAliasGroupChannels("alias-a")
+	require.NoError(t, err)
+	require.Len(t, result.Items, 3)
+
+	assert.Equal(t, channels[0].Id, result.Items[0].ChannelID)
+	require.Len(t, result.Items[0].MatchedModels, 2)
+	assert.Equal(t, "alias-a", result.Items[0].MatchedModels[0].Name)
+	assert.Equal(t, []ModelAliasChannelMatchSource{
+		ModelAliasChannelMatchSourceModels,
+		ModelAliasChannelMatchSourceMappingKey,
+	}, result.Items[0].MatchedModels[0].Sources)
+	assert.Equal(t, "provider-a", result.Items[0].MatchedModels[1].Name)
+	assert.Equal(t, []ModelAliasChannelMatchSource{
+		ModelAliasChannelMatchSourceModels,
+		ModelAliasChannelMatchSourceMappingValue,
+	}, result.Items[0].MatchedModels[1].Sources)
+
+	assert.Equal(t, channels[1].Id, result.Items[1].ChannelID)
+	assert.Equal(t, []string{"alias-a", "provider-a"}, []string{
+		result.Items[1].MatchedModels[0].Name,
+		result.Items[1].MatchedModels[1].Name,
+	})
+	assert.Empty(t, result.Items[1].MappingError)
+
+	assert.Equal(t, channels[3].Id, result.Items[2].ChannelID)
+	assert.Equal(t, "invalid_mapping", result.Items[2].MappingError)
+	require.Len(t, result.Items[2].MatchedModels, 1)
+	assert.Equal(t, []ModelAliasChannelMatchSource{ModelAliasChannelMatchSourceModels}, result.Items[2].MatchedModels[0].Sources)
+}
+
+func TestRemoveModelAliasChannelModelRemovesDirectModelOnly(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	_, err := SaveModelAliasGroups([]ModelAliasGroup{
+		{Alias: "alias-a", Models: []string{"provider-a"}},
+	})
+	require.NoError(t, err)
+	channel := newModelAliasTestChannel("直接模型", "provider-a,other", map[string]string{"other-alias": "other"})
+	require.NoError(t, DB.Create(channel).Error)
+	require.NoError(t, channel.AddAbilities(DB))
+
+	matches, err := ListModelAliasGroupChannels("alias-a")
+	require.NoError(t, err)
+	require.Len(t, matches.Items, 1)
+	result, err := RemoveModelAliasChannelModel("alias-a", channel.Id, "provider-a", matches.Items[0].Revision, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"provider-a"}, result.RemovedModels)
+	assert.Empty(t, result.RemovedMappingKeys)
+
+	var stored Channel
+	require.NoError(t, DB.First(&stored, channel.Id).Error)
+	assert.Equal(t, []string{"other"}, stored.GetModels())
+	require.NotNil(t, stored.ModelMapping)
+	assert.JSONEq(t, `{"other-alias":"other"}`, *stored.ModelMapping)
+	var removedAbilityCount int64
+	require.NoError(t, DB.Model(&Ability{}).Where("channel_id = ? AND model = ?", channel.Id, "provider-a").Count(&removedAbilityCount).Error)
+	assert.Zero(t, removedAbilityCount)
+}
+
+func TestRemoveModelAliasChannelModelPreservesValidUnrelatedModelEntries(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	_, err := SaveModelAliasGroups([]ModelAliasGroup{
+		{Alias: "alias-a", Models: []string{"provider-a"}},
+	})
+	require.NoError(t, err)
+	channel := newModelAliasTestChannel("保留无关模型", "provider-a,, ,other,other", nil)
+	require.NoError(t, DB.Create(channel).Error)
+	require.NoError(t, channel.AddAbilities(DB))
+
+	matches, err := ListModelAliasGroupChannels("alias-a")
+	require.NoError(t, err)
+	result, err := RemoveModelAliasChannelModel("alias-a", channel.Id, "provider-a", matches.Items[0].Revision, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"provider-a"}, result.RemovedModels)
+
+	var stored Channel
+	require.NoError(t, DB.First(&stored, channel.Id).Error)
+	assert.Equal(t, "other,other", stored.Models)
+	var abilities []Ability
+	require.NoError(t, DB.Where("channel_id = ?", channel.Id).Find(&abilities).Error)
+	require.Len(t, abilities, 1)
+	assert.Equal(t, "other", strings.TrimSpace(abilities[0].Model))
+}
+
+func TestRemoveModelAliasChannelModelDeletesAbilitiesForLastModel(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	_, err := SaveModelAliasGroups([]ModelAliasGroup{
+		{Alias: "alias-a", Models: []string{"provider-a"}},
+	})
+	require.NoError(t, err)
+	channel := newModelAliasTestChannel("删除最后模型", "provider-a", nil)
+	require.NoError(t, DB.Create(channel).Error)
+	require.NoError(t, channel.AddAbilities(DB))
+
+	matches, err := ListModelAliasGroupChannels("alias-a")
+	require.NoError(t, err)
+	_, err = RemoveModelAliasChannelModel("alias-a", channel.Id, "provider-a", matches.Items[0].Revision, false)
+	require.NoError(t, err)
+
+	var stored Channel
+	require.NoError(t, DB.First(&stored, channel.Id).Error)
+	assert.Empty(t, stored.Models)
+	var abilityCount int64
+	require.NoError(t, DB.Model(&Ability{}).Where("channel_id = ?", channel.Id).Count(&abilityCount).Error)
+	assert.Zero(t, abilityCount)
+}
+
+func TestRemoveModelAliasChannelModelUsesLockedDatabaseConfiguration(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	_, err := SaveModelAliasGroups([]ModelAliasGroup{
+		{Alias: "alias-a", Models: []string{"provider-a"}},
+	})
+	require.NoError(t, err)
+	channel := newModelAliasTestChannel("配置并发变化", "provider-a", nil)
+	require.NoError(t, DB.Create(channel).Error)
+
+	matches, err := ListModelAliasGroupChannels("alias-a")
+	require.NoError(t, err)
+	changedGroups, err := common.Marshal([]ModelAliasGroup{
+		{Alias: "alias-a", Models: []string{"provider-b"}},
+		{Alias: "alias-b", Models: []string{"provider-a"}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, DB.Model(&Option{}).Where(commonKeyCol+" = ?", ModelAliasGroupsOptionKey).Update("value", string(changedGroups)).Error)
+
+	_, err = RemoveModelAliasChannelModel("alias-a", channel.Id, "provider-a", matches.Items[0].Revision, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "不属于别名组")
+
+	var stored Channel
+	require.NoError(t, DB.First(&stored, channel.Id).Error)
+	assert.Equal(t, "provider-a", stored.Models)
+}
+
+func TestRemoveModelAliasChannelModelCascadesDependentMappings(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	_, err := SaveModelAliasGroups([]ModelAliasGroup{
+		{Alias: "alias-a", Models: []string{"provider-a"}},
+		{Alias: "alias-b", Models: []string{"provider-b"}},
+	})
+	require.NoError(t, err)
+	channel := newModelAliasTestChannel("级联映射", "provider-a,alias-a,alias-b,other", map[string]string{
+		"alias-a":     "provider-a",
+		"alias-b":     "alias-a",
+		"other-alias": "other",
+	})
+	require.NoError(t, DB.Create(channel).Error)
+	require.NoError(t, channel.AddAbilities(DB))
+
+	matches, err := ListModelAliasGroupChannels("alias-a")
+	require.NoError(t, err)
+	require.Len(t, matches.Items, 1)
+	providerMatch := matches.Items[0].MatchedModels[1]
+	assert.True(t, providerMatch.RemovalPlan.RequiresConfirm)
+	assert.Equal(t, []string{"provider-a", "alias-a", "alias-b"}, providerMatch.RemovalPlan.RemovedModels)
+	assert.Equal(t, []string{"alias-a", "alias-b"}, providerMatch.RemovalPlan.RemovedMappingKeys)
+
+	_, err = RemoveModelAliasChannelModel("alias-a", channel.Id, "provider-a", matches.Items[0].Revision, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "请确认")
+
+	result, err := RemoveModelAliasChannelModel("alias-a", channel.Id, "provider-a", matches.Items[0].Revision, true)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"provider-a", "alias-a", "alias-b"}, result.RemovedModels)
+	assert.Equal(t, []string{"alias-a", "alias-b"}, result.RemovedMappingKeys)
+	assert.Equal(t, []string{"alias-a", "alias-b"}, result.AffectedAliases)
+
+	var stored Channel
+	require.NoError(t, DB.First(&stored, channel.Id).Error)
+	assert.Equal(t, []string{"other"}, stored.GetModels())
+	require.NotNil(t, stored.ModelMapping)
+	assert.JSONEq(t, `{"other-alias":"other"}`, *stored.ModelMapping)
+	var abilityCount int64
+	require.NoError(t, DB.Model(&Ability{}).Where("channel_id = ?", channel.Id).Count(&abilityCount).Error)
+	assert.EqualValues(t, 1, abilityCount)
+}
+
+func TestRemoveModelAliasChannelModelKeepsMappingTargetWhenAliasIsDeleted(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	_, err := SaveModelAliasGroups([]ModelAliasGroup{
+		{Alias: "alias-a", Models: []string{"provider-a"}},
+	})
+	require.NoError(t, err)
+	channel := newModelAliasTestChannel("删除统一名", "alias-a,provider-a", map[string]string{"alias-a": "provider-a"})
+	require.NoError(t, DB.Create(channel).Error)
+	require.NoError(t, channel.AddAbilities(DB))
+
+	matches, err := ListModelAliasGroupChannels("alias-a")
+	require.NoError(t, err)
+	result, err := RemoveModelAliasChannelModel("alias-a", channel.Id, "alias-a", matches.Items[0].Revision, true)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"alias-a"}, result.RemovedModels)
+	assert.Equal(t, []string{"alias-a"}, result.RemovedMappingKeys)
+
+	var stored Channel
+	require.NoError(t, DB.First(&stored, channel.Id).Error)
+	assert.Equal(t, []string{"provider-a"}, stored.GetModels())
+	require.NotNil(t, stored.ModelMapping)
+	assert.JSONEq(t, `{}`, *stored.ModelMapping)
+}
+
+func TestRemoveModelAliasChannelModelRemovesMappingOnly(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	_, err := SaveModelAliasGroups([]ModelAliasGroup{
+		{Alias: "alias-a", Models: []string{"provider-a"}},
+	})
+	require.NoError(t, err)
+	channel := newModelAliasTestChannel("仅删除映射", "provider-a", map[string]string{"alias-a": "provider-a"})
+	require.NoError(t, DB.Create(channel).Error)
+	require.NoError(t, channel.AddAbilities(DB))
+
+	matches, err := ListModelAliasGroupChannels("alias-a")
+	require.NoError(t, err)
+	require.Len(t, matches.Items, 1)
+	aliasMatch := matches.Items[0].MatchedModels[0]
+	assert.Empty(t, aliasMatch.RemovalPlan.RemovedModels)
+	assert.Equal(t, []string{"alias-a"}, aliasMatch.RemovalPlan.RemovedMappingKeys)
+	assert.True(t, aliasMatch.RemovalPlan.RequiresConfirm)
+
+	_, err = RemoveModelAliasChannelModel("alias-a", channel.Id, "alias-a", matches.Items[0].Revision, false)
+	require.Error(t, err)
+	result, err := RemoveModelAliasChannelModel("alias-a", channel.Id, "alias-a", matches.Items[0].Revision, true)
+	require.NoError(t, err)
+	assert.Empty(t, result.RemovedModels)
+	assert.Equal(t, []string{"alias-a"}, result.RemovedMappingKeys)
+
+	var stored Channel
+	require.NoError(t, DB.First(&stored, channel.Id).Error)
+	assert.Equal(t, "provider-a", stored.Models)
+	require.NotNil(t, stored.ModelMapping)
+	assert.JSONEq(t, `{}`, *stored.ModelMapping)
+	var abilityCount int64
+	require.NoError(t, DB.Model(&Ability{}).Where("channel_id = ?", channel.Id).Count(&abilityCount).Error)
+	assert.EqualValues(t, 1, abilityCount)
+}
+
+func TestRemoveModelAliasChannelModelRejectsStaleRevisionAndInvalidMapping(t *testing.T) {
+	setupModelAliasGroupTest(t)
+	_, err := SaveModelAliasGroups([]ModelAliasGroup{
+		{Alias: "alias-a", Models: []string{"provider-a"}},
+	})
+	require.NoError(t, err)
+	channel := newModelAliasTestChannel("配置变化", "provider-a", nil)
+	require.NoError(t, DB.Create(channel).Error)
+
+	matches, err := ListModelAliasGroupChannels("alias-a")
+	require.NoError(t, err)
+	_, err = RemoveModelAliasChannelModel("alias-a", channel.Id, "provider-a", "invalid", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "版本无效")
+
+	require.NoError(t, DB.Model(&Channel{}).Where("id = ?", channel.Id).Update("models", "provider-a,other").Error)
+	_, err = RemoveModelAliasChannelModel("alias-a", channel.Id, "provider-a", matches.Items[0].Revision, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "配置已变化")
+
+	invalidMapping := "{"
+	require.NoError(t, DB.Model(&Channel{}).Where("id = ?", channel.Id).Updates(map[string]any{
+		"models":        "provider-a",
+		"model_mapping": invalidMapping,
+	}).Error)
+	var stored Channel
+	require.NoError(t, DB.First(&stored, channel.Id).Error)
+	_, err = RemoveModelAliasChannelModel("alias-a", channel.Id, "provider-a", modelAliasChannelRevision(&stored), false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "映射格式无效")
+}
+
 func TestModelAliasGroupPreviewAndApply(t *testing.T) {
 	setupModelAliasGroupTest(t)
 	groups, err := SaveModelAliasGroups([]ModelAliasGroup{

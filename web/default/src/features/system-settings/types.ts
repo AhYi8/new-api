@@ -302,6 +302,52 @@ export type ModelAliasApplyRequest = {
   target_models?: Record<number, string>
 }
 
+export type ModelAliasChannelMatchSource =
+  | 'models'
+  | 'mapping_key'
+  | 'mapping_value'
+
+export type ModelAliasChannelRemovalPlan = {
+  removed_models: string[]
+  removed_mapping_keys: string[]
+  requires_confirm: boolean
+}
+
+export type ModelAliasChannelMatchedModel = {
+  name: string
+  sources: ModelAliasChannelMatchSource[]
+  removal_plan: ModelAliasChannelRemovalPlan
+}
+
+export type ModelAliasChannelMatch = {
+  channel_id: number
+  channel_name: string
+  channel_status: number
+  revision: string
+  mapping_error?: string
+  matched_models: ModelAliasChannelMatchedModel[]
+}
+
+export type ModelAliasChannelMatches = {
+  alias: string
+  items: ModelAliasChannelMatch[]
+}
+
+export type RemoveModelAliasChannelModelRequest = {
+  alias: string
+  model_name: string
+  revision: string
+  allow_cascade: boolean
+}
+
+export type ModelAliasChannelRemovalResult = {
+  channel_id: number
+  channel_name: string
+  requested_model: string
+  removed_models: string[]
+  removed_mapping_keys: string[]
+}
+
 export type ModelAliasGroupsResponse = {
   success: boolean
   message: string
@@ -326,6 +372,18 @@ export type ModelAliasApplyResponse = {
   success: boolean
   message: string
   data: ModelAliasApplyResult
+}
+
+export type ModelAliasChannelMatchesResponse = {
+  success: boolean
+  message: string
+  data: ModelAliasChannelMatches
+}
+
+export type RemoveModelAliasChannelModelResponse = {
+  success: boolean
+  message: string
+  data: ModelAliasChannelRemovalResult
 }
 
 export type BillingSettings = {

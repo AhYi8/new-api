@@ -79,12 +79,55 @@ func TestModelAliasGroupEndpointRequiresRootUser(t *testing.T) {
 	engine := gin.New()
 	engine.Use(sessions.Sessions("session", cookie.NewStore([]byte("model-alias-test"))))
 	engine.GET("/api/option/model-alias-groups", middleware.RootAuth(), GetModelAliasGroups)
+	engine.GET("/api/option/model-alias-groups/channels", middleware.RootAuth(), ListModelAliasGroupChannels)
+	engine.DELETE("/api/option/model-alias-groups/channels/:channel_id/models", middleware.RootAuth(), RemoveModelAliasChannelModel)
 
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest("GET", "/api/option/model-alias-groups", nil)
-	engine.ServeHTTP(recorder, request)
+	testCases := []struct {
+		method string
+		path   string
+	}{
+		{method: "GET", path: "/api/option/model-alias-groups"},
+		{method: "GET", path: "/api/option/model-alias-groups/channels?alias=alias"},
+		{method: "DELETE", path: "/api/option/model-alias-groups/channels/1/models"},
+	}
+	for _, testCase := range testCases {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(testCase.method, testCase.path, nil)
+		engine.ServeHTTP(recorder, request)
+		assert.Equal(t, 401, recorder.Code, testCase.path)
+	}
+}
 
-	assert.Equal(t, 401, recorder.Code)
+func TestRemoveModelAliasChannelModelRejectsInvalidRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	invalidIDRecorder := httptest.NewRecorder()
+	invalidIDContext, _ := gin.CreateTestContext(invalidIDRecorder)
+	invalidIDContext.Params = gin.Params{{Key: "channel_id", Value: "invalid"}}
+	invalidIDContext.Request = httptest.NewRequest("DELETE", "/api/option/model-alias-groups/channels/invalid/models", nil)
+	RemoveModelAliasChannelModel(invalidIDContext)
+
+	var invalidIDResponse struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, common.Unmarshal(invalidIDRecorder.Body.Bytes(), &invalidIDResponse))
+	assert.False(t, invalidIDResponse.Success)
+	assert.Equal(t, "渠道 ID 无效", invalidIDResponse.Message)
+
+	invalidJSONRecorder := httptest.NewRecorder()
+	invalidJSONContext, _ := gin.CreateTestContext(invalidJSONRecorder)
+	invalidJSONContext.Params = gin.Params{{Key: "channel_id", Value: "1"}}
+	invalidJSONContext.Request = httptest.NewRequest("DELETE", "/api/option/model-alias-groups/channels/1/models", strings.NewReader("{"))
+	RemoveModelAliasChannelModel(invalidJSONContext)
+
+	var invalidJSONResponse struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, common.Unmarshal(invalidJSONRecorder.Body.Bytes(), &invalidJSONResponse))
+	assert.False(t, invalidJSONResponse.Success)
+	assert.Equal(t, "无效的渠道模型删除参数", invalidJSONResponse.Message)
 }
 
 func TestSearchModelAliasCatalogReturnsModelNames(t *testing.T) {
