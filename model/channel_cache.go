@@ -294,6 +294,15 @@ func CacheUpdateChannelStatus(id int, status int) {
 }
 
 func CacheUpdateChannel(channel *Channel) {
+	cacheUpdateChannel(channel, false)
+}
+
+// CacheUpdateChannelIfNewer 仅发布更高状态代次的事务快照，避免覆盖并发管理操作已刷新的缓存。
+func CacheUpdateChannelIfNewer(channel *Channel) {
+	cacheUpdateChannel(channel, true)
+}
+
+func cacheUpdateChannel(channel *Channel, requireNewerGeneration bool) {
 	if !common.MemoryCacheEnabled {
 		return
 	}
@@ -307,7 +316,26 @@ func CacheUpdateChannel(channel *Channel) {
 		channelsIDM = make(map[int]*Channel)
 	}
 	if oldChannel, ok := channelsIDM[channel.Id]; ok {
+		if requireNewerGeneration && oldChannel.ChannelInfo.StateGeneration >= channel.ChannelInfo.StateGeneration {
+			channelSyncLock.Unlock()
+			return
+		}
+		if requireNewerGeneration {
+			channel.ChannelInfo.MultiKeyPollingIndex = oldChannel.ChannelInfo.MultiKeyPollingIndex
+		}
 		logger.LogDebug(nil, "CacheUpdateChannel before: id=%d, name=%s, status=%d, polling_index=%d", channel.Id, channel.Name, channel.Status, oldChannel.ChannelInfo.MultiKeyPollingIndex)
+	}
+	if requireNewerGeneration && channel.Status != common.ChannelStatusEnabled {
+		for group, model2channels := range group2model2channels {
+			for model, channels := range model2channels {
+				for i, channelID := range channels {
+					if channelID == channel.Id {
+						group2model2channels[group][model] = append(channels[:i], channels[i+1:]...)
+						break
+					}
+				}
+			}
+		}
 	}
 	channelsIDM[channel.Id] = channel
 	if channel2advancedCustomConfig == nil {

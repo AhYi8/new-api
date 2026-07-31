@@ -229,7 +229,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
 		relayInfo.LastError = newAPIError
 
-		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
+		processChannelError(c, *newChannelError(channel, c), newAPIError)
 
 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
 			break
@@ -355,13 +355,27 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 }
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {
+	processChannelErrorInternal(c, channelError, err, false)
+}
+
+func processChannelTestError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) bool {
+	return processChannelErrorInternal(c, channelError, err, true)
+}
+
+// processChannelErrorInternal 对渠道测试同步写入禁用状态，普通转发保持异步处理。
+func processChannelErrorInternal(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, synchronousDisable bool) bool {
 	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.Error())))
 	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
+	disabled := false
 	if service.ShouldDisableChannel(err) && channelError.AutoBan {
-		gopool.Go(func() {
-			service.DisableChannel(channelError, err.ErrorWithStatusCode(), err.GetOriginalStatusCode())
-		})
+		if synchronousDisable {
+			disabled = service.DisableChannel(channelError, err.ErrorWithStatusCode(), err.GetOriginalStatusCode())
+		} else {
+			gopool.Go(func() {
+				service.DisableChannel(channelError, err.ErrorWithStatusCode(), err.GetOriginalStatusCode())
+			})
+		}
 	}
 
 	if constant.ErrorLogEnabled && types.IsRecordErrorLog(err) {
@@ -398,7 +412,35 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		useTimeSeconds := int(time.Since(startTime).Seconds())
 		model.RecordErrorLog(c, userId, channelId, modelName, tokenName, err.MaskSensitiveErrorWithStatusCode(), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
 	}
+	return disabled
+}
 
+func newChannelError(channel *model.Channel, c *gin.Context) *types.ChannelError {
+	usingKey := ""
+	isMultiKey := channel.ChannelInfo.IsMultiKey
+	var usingKeyIndex *int
+	var channelStateGeneration *int64
+	if c != nil {
+		usingKey = common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+		if generation, ok := common.GetContextKeyType[int64](c, constant.ContextKeyChannelStateGeneration); ok {
+			channelStateGeneration = common.GetPointer(generation)
+		}
+		if isMultiKey {
+			if keyIndex, ok := common.GetContextKeyType[int](c, constant.ContextKeyChannelMultiKeyIndex); ok {
+				usingKeyIndex = common.GetPointer(keyIndex)
+			}
+		}
+	}
+	return types.NewChannelError(
+		channel.Id,
+		channel.Type,
+		channel.Name,
+		isMultiKey,
+		usingKey,
+		usingKeyIndex,
+		channelStateGeneration,
+		channel.GetAutoBan(),
+	)
 }
 
 func RelayMidjourney(c *gin.Context) {
@@ -555,8 +597,7 @@ func RelayTask(c *gin.Context) {
 
 		if !taskErr.LocalError {
 			processChannelError(c,
-				*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey,
-					common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()),
+				*newChannelError(channel, c),
 				types.NewOpenAIError(taskErr.Error, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode))
 		}
 

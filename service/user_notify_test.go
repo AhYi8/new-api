@@ -53,14 +53,15 @@ func TestDisableChannelSkipsNotificationWithoutChangingStatusUpdate(t *testing.T
 	root := createRootUserForChannelNotificationTest(t, db, dto.UserSetting{ChannelAutoDisableNotifyEnabled: &disabled})
 
 	channel := model.Channel{
-		Name:   "channel-notify-disabled",
-		Type:   1,
-		Key:    "test-key",
-		Status: common.ChannelStatusEnabled,
+		Name:    "channel-notify-disabled",
+		Type:    1,
+		Key:     "test-key",
+		Status:  common.ChannelStatusEnabled,
+		AutoBan: common.GetPointer(1),
 	}
 	require.NoError(t, db.Create(&channel).Error)
 
-	channelError := types.NewChannelError(channel.Id, channel.Type, channel.Name, false, channel.Key, true)
+	channelError := types.NewChannelError(channel.Id, channel.Type, channel.Name, false, channel.Key, nil, common.GetPointer(int64(0)), true)
 	DisableChannel(*channelError, "test error", 401)
 
 	var stored model.Channel
@@ -100,11 +101,12 @@ func TestDisableMultiKeyChannelPreservesPerKeyBehaviorWhenNotificationDisabled(t
 		Type:        1,
 		Key:         "first-key\nsecond-key",
 		Status:      common.ChannelStatusEnabled,
+		AutoBan:     common.GetPointer(1),
 		ChannelInfo: model.ChannelInfo{IsMultiKey: true},
 	}
 	require.NoError(t, db.Create(&channel).Error)
 
-	firstError := types.NewChannelError(channel.Id, channel.Type, channel.Name, true, "first-key", true)
+	firstError := types.NewChannelError(channel.Id, channel.Type, channel.Name, true, "first-key", common.GetPointer(0), common.GetPointer(int64(0)), true)
 	DisableChannel(*firstError, "first key error", 401)
 
 	var stored model.Channel
@@ -112,7 +114,7 @@ func TestDisableMultiKeyChannelPreservesPerKeyBehaviorWhenNotificationDisabled(t
 	assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
 	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.ChannelInfo.MultiKeyStatusList[0])
 
-	secondError := types.NewChannelError(channel.Id, channel.Type, channel.Name, true, "second-key", true)
+	secondError := types.NewChannelError(channel.Id, channel.Type, channel.Name, true, "second-key", common.GetPointer(1), common.GetPointer(int64(1)), true)
 	DisableChannel(*secondError, "second key error", 401)
 
 	require.NoError(t, db.First(&stored, channel.Id).Error)
@@ -120,6 +122,62 @@ func TestDisableMultiKeyChannelPreservesPerKeyBehaviorWhenNotificationDisabled(t
 	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.ChannelInfo.MultiKeyStatusList[0])
 	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.ChannelInfo.MultiKeyStatusList[1])
 	assertChannelNotificationLimitUnused(t, root.Id, formatNotifyType(channel.Id, common.ChannelStatusAutoDisabled))
+}
+
+func TestDisableChannelRechecksLatestAutoBan(t *testing.T) {
+	db := setupChannelNotificationServiceTest(t)
+	disabled := false
+	root := createRootUserForChannelNotificationTest(t, db, dto.UserSetting{ChannelAutoDisableNotifyEnabled: &disabled})
+
+	channel := model.Channel{
+		Name:    "latest-auto-ban-disabled",
+		Type:    1,
+		Key:     "test-key",
+		Status:  common.ChannelStatusEnabled,
+		AutoBan: common.GetPointer(0),
+	}
+	require.NoError(t, db.Create(&channel).Error)
+
+	channelError := types.NewChannelError(channel.Id, channel.Type, channel.Name, false, channel.Key, nil, common.GetPointer(int64(0)), true)
+	assert.False(t, DisableChannel(*channelError, "delayed error", 401))
+
+	var stored model.Channel
+	require.NoError(t, db.First(&stored, channel.Id).Error)
+	assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+	assertChannelNotificationLimitUnused(t, root.Id, formatNotifyType(channel.Id, common.ChannelStatusAutoDisabled))
+}
+
+func TestDisableChannelRejectsDuplicateFailureGeneration(t *testing.T) {
+	db := setupChannelNotificationServiceTest(t)
+	disabled := false
+	_ = createRootUserForChannelNotificationTest(t, db, dto.UserSetting{ChannelAutoDisableNotifyEnabled: &disabled})
+
+	channel := model.Channel{
+		Name:    "duplicate-failure-generation",
+		Type:    1,
+		Key:     "test-key",
+		Status:  common.ChannelStatusEnabled,
+		AutoBan: common.GetPointer(1),
+	}
+	require.NoError(t, db.Create(&channel).Error)
+
+	channelError := types.NewChannelError(
+		channel.Id,
+		channel.Type,
+		channel.Name,
+		false,
+		channel.Key,
+		nil,
+		common.GetPointer(int64(0)),
+		true,
+	)
+	require.True(t, DisableChannel(*channelError, "first failure", 401))
+	assert.False(t, DisableChannel(*channelError, "duplicate failure", 401))
+
+	var stored model.Channel
+	require.NoError(t, db.First(&stored, channel.Id).Error)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.Status)
+	assert.Equal(t, int64(1), stored.ChannelInfo.StateGeneration)
 }
 
 func setupChannelNotificationServiceTest(t *testing.T) *gorm.DB {

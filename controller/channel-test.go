@@ -72,6 +72,15 @@ func resolveChannelTestUserID(c *gin.Context) (int, error) {
 	return rootUser.Id, nil
 }
 
+// shouldAutoDisableTestedChannel 统一判断手动和批量渠道测试是否允许触发自动禁用。
+// 只有测试上下文存在、渠道当前启用且明确开启 AutoBan 时，才会把错误归因到本次使用的密钥。
+func shouldAutoDisableTestedChannel(channel *model.Channel, c *gin.Context, err *types.NewAPIError) bool {
+	if channel == nil || c == nil || channel.Status != common.ChannelStatusEnabled || !channel.GetAutoBan() {
+		return false
+	}
+	return service.ShouldDisableChannel(err)
+}
+
 func testChannel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) testResult {
 	return testChannelWithKeyIndex(ctx, channel, testUserID, testModel, endpointType, isStream, nil)
 }
@@ -868,6 +877,9 @@ func TestChannel(c *gin.Context) {
 	}
 	result := testChannel(requestCtx, channel, testUserID, testModel, endpointType, isStream)
 	if result.localErr != nil {
+		if shouldAutoDisableTestedChannel(channel, result.context, result.newAPIError) {
+			processChannelTestError(result.context, *newChannelError(channel, result.context), result.newAPIError)
+		}
 		resp := gin.H{
 			"success": false,
 			"message": result.localErr.Error(),
@@ -1099,11 +1111,25 @@ func reconcileAutoDisabledMultiKeyChannels(ctx context.Context, channels []*mode
 	return enabled
 }
 
+func resolveChannelTestError(result testResult, milliseconds int64, disableThreshold int64) *types.NewAPIError {
+	newAPIError := result.newAPIError
+	shouldBanChannel := service.ShouldDisableChannel(newAPIError)
+	if common.AutomaticDisableChannelEnabled && !shouldBanChannel && milliseconds > disableThreshold {
+		err := fmt.Errorf("响应时间 %.2fs 超过阈值 %.2fs", float64(milliseconds)/1000.0, float64(disableThreshold)/1000.0)
+		return types.NewOpenAIError(err, types.ErrorCodeChannelResponseTimeExceeded, http.StatusRequestTimeout)
+	}
+	return newAPIError
+}
+
 // performChannelTests runs the channel test loop synchronously, honoring ctx
 // cancellation so a system-task runner that loses its lease stops promptly. When
 // report is non-nil it is called after each channel with (processed, total) so
 // the system task can surface progress.
 func performChannelTests(ctx context.Context, channels []*model.Channel, testUserID int, allowDisable bool, report func(processed, total int)) channelTestSummary {
+	return performChannelTestsWithTester(ctx, channels, testUserID, allowDisable, report, testChannel)
+}
+
+func performChannelTestsWithTester(ctx context.Context, channels []*model.Channel, testUserID int, allowDisable bool, report func(processed, total int), tester func(context.Context, *model.Channel, int, string, string, bool) testResult) channelTestSummary {
 	summary := channelTestSummary{}
 	var disableThreshold = int64(common.ChannelDisableThreshold * 1000)
 	if disableThreshold == 0 {
@@ -1123,7 +1149,7 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 		}
 		isChannelEnabled := channel.Status == common.ChannelStatusEnabled
 		tik := time.Now()
-		result := testChannel(ctx, channel, testUserID, "", "", shouldUseStreamForAutomaticChannelTest(channel))
+		result := tester(ctx, channel, testUserID, "", "", shouldUseStreamForAutomaticChannelTest(channel))
 		tok := time.Now()
 		milliseconds := tok.Sub(tik).Milliseconds()
 		if ctx != nil && ctx.Err() != nil {
@@ -1132,21 +1158,7 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 
 		summary.Tested++
 
-		shouldBanChannel := false
-		newAPIError := result.newAPIError
-		// request error disables the channel
-		if newAPIError != nil {
-			shouldBanChannel = service.ShouldDisableChannel(result.newAPIError)
-		}
-
-		// 当错误检查通过，才检查响应时间
-		if common.AutomaticDisableChannelEnabled && !shouldBanChannel {
-			if milliseconds > disableThreshold {
-				err := fmt.Errorf("响应时间 %.2fs 超过阈值 %.2fs", float64(milliseconds)/1000.0, float64(disableThreshold)/1000.0)
-				newAPIError = types.NewOpenAIError(err, types.ErrorCodeChannelResponseTimeExceeded, http.StatusRequestTimeout)
-				shouldBanChannel = true
-			}
-		}
+		newAPIError := resolveChannelTestError(result, milliseconds, disableThreshold)
 
 		if newAPIError == nil {
 			summary.Succeeded++
@@ -1155,9 +1167,10 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 		}
 
 		// disable channel
-		if allowDisable && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
-			processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
-			summary.Disabled++
+		if allowDisable && isChannelEnabled && shouldAutoDisableTestedChannel(channel, result.context, newAPIError) {
+			if processChannelTestError(result.context, *newChannelError(channel, result.context), newAPIError) {
+				summary.Disabled++
+			}
 		}
 
 		// enable channel

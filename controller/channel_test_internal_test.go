@@ -5,13 +5,16 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
@@ -85,6 +88,229 @@ func TestResolveChannelTestUserIDUsesRequestUser(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, 2, userID)
+}
+
+func TestShouldAutoDisableTestedChannel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	originalAutomaticDisable := common.AutomaticDisableChannelEnabled
+	t.Cleanup(func() {
+		common.AutomaticDisableChannelEnabled = originalAutomaticDisable
+	})
+	common.AutomaticDisableChannelEnabled = true
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	autoBan := 1
+	channel := &model.Channel{
+		Status:  common.ChannelStatusEnabled,
+		AutoBan: &autoBan,
+	}
+	disablingError := types.NewError(errors.New("invalid key"), types.ErrorCodeChannelInvalidKey)
+
+	require.True(t, shouldAutoDisableTestedChannel(channel, ctx, disablingError))
+
+	channel.Status = common.ChannelStatusManuallyDisabled
+	require.False(t, shouldAutoDisableTestedChannel(channel, ctx, disablingError))
+	channel.Status = common.ChannelStatusEnabled
+
+	autoBan = 0
+	require.False(t, shouldAutoDisableTestedChannel(channel, ctx, disablingError))
+	autoBan = 1
+
+	require.False(t, shouldAutoDisableTestedChannel(channel, nil, disablingError))
+	require.False(t, shouldAutoDisableTestedChannel(channel, ctx, nil))
+
+	common.AutomaticDisableChannelEnabled = false
+	require.False(t, shouldAutoDisableTestedChannel(channel, ctx, disablingError))
+}
+
+func TestNewChannelErrorDoesNotDefaultMissingMultiKeyIndex(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyChannelKey, "first-key")
+
+	channel := &model.Channel{
+		Id:   1,
+		Key:  "first-key\nsecond-key",
+		Name: "missing-index-channel",
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey: true,
+		},
+	}
+	channelError := newChannelError(channel, ctx)
+
+	assert.True(t, channelError.IsMultiKey)
+	assert.Equal(t, "first-key", channelError.UsingKey)
+	assert.Nil(t, channelError.UsingKeyIndex)
+	assert.Nil(t, channelError.ChannelStateGeneration)
+}
+
+func TestChannelAutoDisablesExactMultiKeySynchronously(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	originalAutomaticDisable := common.AutomaticDisableChannelEnabled
+	originalMemoryCacheEnabled := common.MemoryCacheEnabled
+	originalErrorLogEnabled := constant.ErrorLogEnabled
+	originalDisableRanges := operation_setting.AutomaticDisableStatusCodeRanges
+	common.AutomaticDisableChannelEnabled = true
+	common.MemoryCacheEnabled = false
+	constant.ErrorLogEnabled = false
+	operation_setting.AutomaticDisableStatusCodeRanges = []operation_setting.StatusCodeRange{{Start: http.StatusUnauthorized, End: http.StatusUnauthorized}}
+	service.InitHttpClient()
+	t.Cleanup(func() {
+		common.AutomaticDisableChannelEnabled = originalAutomaticDisable
+		common.MemoryCacheEnabled = originalMemoryCacheEnabled
+		constant.ErrorLogEnabled = originalErrorLogEnabled
+		operation_setting.AutomaticDisableStatusCodeRanges = originalDisableRanges
+	})
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"Incorrect API key","type":"invalid_request_error","code":"invalid_api_key"}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	userSetting, err := common.Marshal(dto.UserSetting{AcceptUnsetRatioModel: true})
+	require.NoError(t, err)
+	user := model.User{
+		Username: "channel-test-root",
+		Password: "channel-test-password",
+		Role:     common.RoleRootUser,
+		Status:   common.UserStatusEnabled,
+		Group:    "default",
+		Quota:    100000,
+		Setting:  string(userSetting),
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	testModel := "gpt-4o-mini"
+	channel := model.Channel{
+		Name:      "manual-test-duplicate-key",
+		Type:      constant.ChannelTypeOpenAI,
+		Key:       "same-key\nsame-key",
+		Status:    common.ChannelStatusEnabled,
+		BaseURL:   common.GetPointer(upstream.URL),
+		Models:    testModel,
+		TestModel: &testModel,
+		AutoBan:   common.GetPointer(1),
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey:         true,
+			MultiKeySize:       2,
+			MultiKeyStatusList: map[int]int{0: common.ChannelStatusManuallyDisabled},
+		},
+	}
+	require.NoError(t, db.Create(&channel).Error)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/channel/test/"+strconv.Itoa(channel.Id)+"?model="+testModel, nil)
+	ctx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(channel.Id)}}
+	ctx.Set("id", user.Id)
+
+	TestChannel(ctx)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.False(t, response.Success, recorder.Body.String())
+
+	stored, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, common.ChannelStatusManuallyDisabled, stored.ChannelInfo.MultiKeyStatusList[0])
+	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.ChannelInfo.MultiKeyStatusList[1], response.Message)
+	assert.Equal(t, http.StatusUnauthorized, stored.ChannelInfo.MultiKeyDisabledStatusCode[1], response.Message)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.Status, response.Message)
+}
+
+func TestResolveChannelTestErrorUsesResponseTimeout(t *testing.T) {
+	originalAutomaticDisable := common.AutomaticDisableChannelEnabled
+	common.AutomaticDisableChannelEnabled = true
+	t.Cleanup(func() { common.AutomaticDisableChannelEnabled = originalAutomaticDisable })
+
+	timeoutError := resolveChannelTestError(testResult{}, 2000, 1000)
+	require.NotNil(t, timeoutError)
+	assert.Equal(t, types.ErrorCodeChannelResponseTimeExceeded, timeoutError.GetErrorCode())
+	assert.Equal(t, http.StatusRequestTimeout, timeoutError.StatusCode)
+
+	assert.Nil(t, resolveChannelTestError(testResult{}, 1000, 1000))
+
+	originalError := types.NewError(errors.New("invalid key"), types.ErrorCodeChannelInvalidKey)
+	assert.Same(t, originalError, resolveChannelTestError(testResult{newAPIError: originalError}, 2000, 1000))
+}
+
+func TestPerformChannelTestsRespectsAllowDisable(t *testing.T) {
+	tests := []struct {
+		name          string
+		allowDisable  bool
+		expectedState int
+		expectedCount int
+	}{
+		{
+			name:          "允许禁用时同步写入",
+			allowDisable:  true,
+			expectedState: common.ChannelStatusAutoDisabled,
+			expectedCount: 1,
+		},
+		{
+			name:          "被动恢复模式不禁用",
+			allowDisable:  false,
+			expectedState: common.ChannelStatusEnabled,
+			expectedCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := setupModelListControllerTestDB(t)
+			originalAutomaticDisable := common.AutomaticDisableChannelEnabled
+			originalMemoryCacheEnabled := common.MemoryCacheEnabled
+			originalRequestInterval := common.RequestInterval
+			originalErrorLogEnabled := constant.ErrorLogEnabled
+			common.AutomaticDisableChannelEnabled = true
+			common.MemoryCacheEnabled = false
+			common.RequestInterval = 0
+			constant.ErrorLogEnabled = false
+			t.Cleanup(func() {
+				common.AutomaticDisableChannelEnabled = originalAutomaticDisable
+				common.MemoryCacheEnabled = originalMemoryCacheEnabled
+				common.RequestInterval = originalRequestInterval
+				constant.ErrorLogEnabled = originalErrorLogEnabled
+			})
+
+			channel := &model.Channel{
+				Name:    "batch-test-disable",
+				Key:     "test-key",
+				Status:  common.ChannelStatusEnabled,
+				AutoBan: common.GetPointer(1),
+			}
+			require.NoError(t, db.Create(channel).Error)
+
+			testContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+			testContext.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			common.SetContextKey(testContext, constant.ContextKeyChannelKey, channel.Key)
+			common.SetContextKey(testContext, constant.ContextKeyChannelIsMultiKey, false)
+			common.SetContextKey(testContext, constant.ContextKeyChannelStateGeneration, int64(0))
+			channelError := types.NewError(errors.New("invalid key"), types.ErrorCodeChannelInvalidKey)
+
+			summary := performChannelTestsWithTester(
+				context.Background(),
+				[]*model.Channel{channel},
+				1,
+				tt.allowDisable,
+				nil,
+				func(context.Context, *model.Channel, int, string, string, bool) testResult {
+					return testResult{context: testContext, localErr: channelError, newAPIError: channelError}
+				},
+			)
+
+			assert.Equal(t, tt.expectedCount, summary.Disabled)
+			stored, err := model.GetChannelById(channel.Id, true)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedState, stored.Status)
+		})
+	}
 }
 
 func TestSelectChannelsForAutomaticTestPassiveRecoveryOnlyUsesAutoDisabled(t *testing.T) {

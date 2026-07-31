@@ -48,3 +48,29 @@ func TestSetupContextForSelectedChannelWithKeyIndexRejectsInvalidIndex(t *testin
 
 	require.NotNil(t, SetupContextForSelectedChannelWithKeyIndex(ctx, channel, "gpt-4o-mini", 1))
 }
+
+func TestSetupContextForSelectedChannelClearsPreviousOptionalSettings(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyChannelOrganization, "stale-organization")
+	common.SetContextKey(ctx, constant.ContextKeyChannelMultiKeyIndex, 9)
+	ctx.Set("api_version", "stale-version")
+	ctx.Set("region", "stale-region")
+	ctx.Set("plugin", "stale-plugin")
+	ctx.Set("bot_id", "stale-bot")
+
+	channel := &model.Channel{
+		Id:     2,
+		Type:   constant.ChannelTypeOpenAI,
+		Key:    "target-key",
+		Status: common.ChannelStatusEnabled,
+	}
+	require.Nil(t, SetupContextForSelectedChannel(ctx, channel, "gpt-4o-mini"))
+
+	assert.Empty(t, common.GetContextKeyString(ctx, constant.ContextKeyChannelOrganization))
+	assert.Equal(t, 0, common.GetContextKeyInt(ctx, constant.ContextKeyChannelMultiKeyIndex))
+	assert.Empty(t, ctx.GetString("api_version"))
+	assert.Empty(t, ctx.GetString("region"))
+	assert.Empty(t, ctx.GetString("plugin"))
+	assert.Empty(t, ctx.GetString("bot_id"))
+}

@@ -81,28 +81,28 @@ func TestHandlerMultiKeyUpdateMaintainsDisabledStatusCode(t *testing.T) {
 		},
 	}
 
-	require.True(t, handlerMultiKeyUpdate(channel, "key-1", common.ChannelStatusAutoDisabled, "status_code=401, invalid key", 401))
+	require.True(t, handlerMultiKeyUpdate(channel, "key-1", nil, common.ChannelStatusAutoDisabled, "status_code=401, invalid key", 401))
 	assert.Equal(t, 401, channel.ChannelInfo.MultiKeyDisabledStatusCode[0])
 	assert.Equal(t, int64(1), channel.ChannelInfo.MultiKeyDisabledGeneration[0])
 
-	require.True(t, handlerMultiKeyUpdate(channel, "key-1", common.ChannelStatusAutoDisabled, "status_code=401, invalid key", 401))
+	require.True(t, handlerMultiKeyUpdate(channel, "key-1", nil, common.ChannelStatusAutoDisabled, "status_code=401, invalid key", 401))
 	assert.Equal(t, int64(2), channel.ChannelInfo.MultiKeyDisabledGeneration[0])
 
-	require.True(t, handlerMultiKeyUpdate(channel, "key-1", common.ChannelStatusEnabled, "", 0))
+	require.True(t, handlerMultiKeyUpdate(channel, "key-1", nil, common.ChannelStatusEnabled, "", 0))
 	assert.NotContains(t, channel.ChannelInfo.MultiKeyDisabledStatusCode, 0)
 	assert.NotContains(t, channel.ChannelInfo.MultiKeyDisabledGeneration, 0)
 
 	channel.ChannelInfo.MultiKeyDisabledStatusCode = map[int]int{0: 500}
-	require.True(t, handlerMultiKeyUpdate(channel, "key-1", common.ChannelStatusManuallyDisabled, "manual", 0))
+	require.True(t, handlerMultiKeyUpdate(channel, "key-1", nil, common.ChannelStatusManuallyDisabled, "manual", 0))
 	assert.NotContains(t, channel.ChannelInfo.MultiKeyDisabledStatusCode, 0)
 	assert.NotContains(t, channel.ChannelInfo.MultiKeyDisabledGeneration, 0)
 
-	require.False(t, handlerMultiKeyUpdate(channel, "key-1", common.ChannelStatusAutoDisabled, "status_code=401, invalid key", 401))
+	require.False(t, handlerMultiKeyUpdate(channel, "key-1", nil, common.ChannelStatusAutoDisabled, "status_code=401, invalid key", 401))
 	assert.Equal(t, common.ChannelStatusManuallyDisabled, channel.ChannelInfo.MultiKeyStatusList[0])
 	assert.NotContains(t, channel.ChannelInfo.MultiKeyDisabledGeneration, 0)
 
-	require.True(t, handlerMultiKeyUpdate(channel, "key-1", common.ChannelStatusEnabled, "", 0))
-	require.True(t, handlerMultiKeyUpdate(channel, "key-1", common.ChannelStatusAutoDisabled, "status_code=401, invalid key", 401))
+	require.True(t, handlerMultiKeyUpdate(channel, "key-1", nil, common.ChannelStatusEnabled, "", 0))
+	require.True(t, handlerMultiKeyUpdate(channel, "key-1", nil, common.ChannelStatusAutoDisabled, "status_code=401, invalid key", 401))
 	assert.Equal(t, int64(3), channel.ChannelInfo.MultiKeyDisabledGeneration[0])
 }
 
@@ -142,17 +142,19 @@ func TestUpdateChannelStatusPersistsMultiKeyGenerationWithMemoryCache(t *testing
 	require.NoError(t, err)
 	cachedBeforeUpdate.ChannelInfo.MultiKeyPollingIndex = 1
 
-	require.True(t, UpdateChannelStatusWithDisabledStatusCode(
+	require.True(t, AutoDisableChannel(
 		channel.Id,
 		"key-1",
-		common.ChannelStatusAutoDisabled,
+		common.GetPointer(0),
+		common.GetPointer(int64(0)),
 		"status_code=401, invalid key",
 		401,
 	))
-	require.True(t, UpdateChannelStatusWithDisabledStatusCode(
+	require.False(t, AutoDisableChannel(
 		channel.Id,
 		"key-1",
-		common.ChannelStatusAutoDisabled,
+		common.GetPointer(0),
+		common.GetPointer(int64(0)),
 		"status_code=401, invalid key",
 		401,
 	))
@@ -160,12 +162,13 @@ func TestUpdateChannelStatusPersistsMultiKeyGenerationWithMemoryCache(t *testing
 	stored, err := GetChannelById(channel.Id, true)
 	require.NoError(t, err)
 	assert.Equal(t, 401, stored.ChannelInfo.MultiKeyDisabledStatusCode[0])
-	assert.Equal(t, int64(2), stored.ChannelInfo.MultiKeyDisabledGeneration[0])
-	assert.Equal(t, int64(2), stored.ChannelInfo.MultiKeyGenerationCounter)
+	assert.Equal(t, int64(1), stored.ChannelInfo.MultiKeyDisabledGeneration[0])
+	assert.Equal(t, int64(1), stored.ChannelInfo.MultiKeyGenerationCounter)
+	assert.Equal(t, int64(1), stored.ChannelInfo.StateGeneration)
 
 	cached, err := CacheGetChannel(channel.Id)
 	require.NoError(t, err)
-	assert.Equal(t, int64(2), cached.ChannelInfo.MultiKeyDisabledGeneration[0])
+	assert.Equal(t, int64(1), cached.ChannelInfo.MultiKeyDisabledGeneration[0])
 	assert.Equal(t, 1, cached.ChannelInfo.MultiKeyPollingIndex)
 }
 
@@ -187,10 +190,11 @@ func TestUpdateChannelStatusDoesNotOverrideManualMultiKeyDisable(t *testing.T) {
 	}
 	require.NoError(t, DB.Create(channel).Error)
 
-	changed := UpdateChannelStatusWithDisabledStatusCode(
+	changed := AutoDisableChannel(
 		channel.Id,
 		"key-1",
-		common.ChannelStatusAutoDisabled,
+		common.GetPointer(0),
+		common.GetPointer(int64(0)),
 		"status_code=500, delayed failure",
 		500,
 	)
@@ -208,10 +212,11 @@ func TestUpdateChannelStatusDoesNotOverrideManualMultiKeyDisable(t *testing.T) {
 		"status":       stored.Status,
 		"channel_info": stored.ChannelInfo,
 	}).Error)
-	changed = UpdateChannelStatusWithDisabledStatusCode(
+	changed = AutoDisableChannel(
 		stored.Id,
 		"key-1",
-		common.ChannelStatusAutoDisabled,
+		common.GetPointer(0),
+		common.GetPointer(int64(0)),
 		"status_code=500, delayed failure",
 		500,
 	)
@@ -221,6 +226,376 @@ func TestUpdateChannelStatusDoesNotOverrideManualMultiKeyDisable(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, common.ChannelStatusManuallyDisabled, stored.Status)
 	assert.NotContains(t, stored.ChannelInfo.MultiKeyStatusList, 0)
+}
+
+func TestAutoDisableChannelUsesExactMultiKeyIndex(t *testing.T) {
+	truncateTables(t)
+	originalMemoryCacheEnabled := common.MemoryCacheEnabled
+	common.MemoryCacheEnabled = false
+	t.Cleanup(func() { common.MemoryCacheEnabled = originalMemoryCacheEnabled })
+
+	channel := &Channel{
+		Name:    "duplicate-key-channel",
+		Key:     "same-key\nsame-key",
+		Status:  common.ChannelStatusEnabled,
+		AutoBan: common.GetPointer(1),
+		ChannelInfo: ChannelInfo{
+			IsMultiKey:         true,
+			MultiKeySize:       2,
+			MultiKeyStatusList: map[int]int{0: common.ChannelStatusManuallyDisabled},
+		},
+	}
+	require.NoError(t, DB.Create(channel).Error)
+
+	changed := AutoDisableChannel(channel.Id, "same-key", common.GetPointer(1), common.GetPointer(int64(0)), "status_code=401, invalid key", 401)
+	require.True(t, changed)
+
+	stored, err := GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, common.ChannelStatusManuallyDisabled, stored.ChannelInfo.MultiKeyStatusList[0])
+	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.ChannelInfo.MultiKeyStatusList[1])
+	assert.Equal(t, 401, stored.ChannelInfo.MultiKeyDisabledStatusCode[1])
+	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.Status)
+}
+
+func TestAutoDisableChannelRejectsMissingOrStaleMultiKeyTarget(t *testing.T) {
+	truncateTables(t)
+	originalMemoryCacheEnabled := common.MemoryCacheEnabled
+	common.MemoryCacheEnabled = false
+	t.Cleanup(func() { common.MemoryCacheEnabled = originalMemoryCacheEnabled })
+
+	channel := &Channel{
+		Name:    "stale-key-target-channel",
+		Key:     "first-key\nsecond-key",
+		Status:  common.ChannelStatusEnabled,
+		AutoBan: common.GetPointer(1),
+		ChannelInfo: ChannelInfo{
+			IsMultiKey:   true,
+			MultiKeySize: 2,
+		},
+	}
+	require.NoError(t, DB.Create(channel).Error)
+
+	assert.False(t, AutoDisableChannel(channel.Id, "first-key", common.GetPointer(0), nil, "missing generation", 401))
+	assert.False(t, AutoDisableChannel(channel.Id, "first-key", nil, common.GetPointer(int64(0)), "missing index", 401))
+	assert.False(t, AutoDisableChannel(channel.Id, "first-key", common.GetPointer(2), common.GetPointer(int64(0)), "invalid index", 401))
+	assert.False(t, AutoDisableChannel(channel.Id, "changed-key", common.GetPointer(0), common.GetPointer(int64(0)), "changed key", 401))
+	require.NoError(t, DB.Model(&Channel{}).Where("id = ?", channel.Id).Update("key", "second-key\nfirst-key").Error)
+	assert.False(t, AutoDisableChannel(channel.Id, "first-key", common.GetPointer(0), common.GetPointer(int64(0)), "reordered key", 401))
+
+	stored, err := GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+	assert.Empty(t, stored.ChannelInfo.MultiKeyStatusList)
+}
+
+func TestUpdateChannelStatusRejectsAutoDisabledStatus(t *testing.T) {
+	truncateTables(t)
+	channel := &Channel{
+		Name:    "unverified-auto-disable",
+		Key:     "key",
+		Status:  common.ChannelStatusEnabled,
+		AutoBan: common.GetPointer(1),
+	}
+	require.NoError(t, DB.Create(channel).Error)
+
+	assert.False(t, UpdateChannelStatus(channel.Id, channel.Key, common.ChannelStatusAutoDisabled, "unverified"))
+	stored, err := GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+	assert.Equal(t, int64(0), stored.ChannelInfo.StateGeneration)
+}
+
+func TestAutoDisableChannelRechecksLatestSettingsAndManualStatus(t *testing.T) {
+	tests := []struct {
+		name         string
+		channel      Channel
+		usingKey     string
+		usingIndex   *int
+		assertStored func(t *testing.T, stored Channel)
+	}{
+		{
+			name: "最新 AutoBan 已关闭",
+			channel: Channel{
+				Name:    "auto-ban-disabled",
+				Key:     "key",
+				Status:  common.ChannelStatusEnabled,
+				AutoBan: common.GetPointer(0),
+			},
+			usingKey: "key",
+			assertStored: func(t *testing.T, stored Channel) {
+				assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+			},
+		},
+		{
+			name: "单密钥渠道已手动禁用",
+			channel: Channel{
+				Name:    "manual-single-key",
+				Key:     "key",
+				Status:  common.ChannelStatusManuallyDisabled,
+				AutoBan: common.GetPointer(1),
+			},
+			usingKey: "key",
+			assertStored: func(t *testing.T, stored Channel) {
+				assert.Equal(t, common.ChannelStatusManuallyDisabled, stored.Status)
+			},
+		},
+		{
+			name: "单密钥文本已变更",
+			channel: Channel{
+				Name:    "changed-single-key",
+				Key:     "new-key",
+				Status:  common.ChannelStatusEnabled,
+				AutoBan: common.GetPointer(1),
+			},
+			usingKey: "old-key",
+			assertStored: func(t *testing.T, stored Channel) {
+				assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+			},
+		},
+		{
+			name: "多密钥目标已手动禁用",
+			channel: Channel{
+				Name:    "manual-multi-key",
+				Key:     "key\nother-key",
+				Status:  common.ChannelStatusEnabled,
+				AutoBan: common.GetPointer(1),
+				ChannelInfo: ChannelInfo{
+					IsMultiKey:         true,
+					MultiKeySize:       2,
+					MultiKeyStatusList: map[int]int{0: common.ChannelStatusManuallyDisabled},
+				},
+			},
+			usingKey:   "key",
+			usingIndex: common.GetPointer(0),
+			assertStored: func(t *testing.T, stored Channel) {
+				assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+				assert.Equal(t, common.ChannelStatusManuallyDisabled, stored.ChannelInfo.MultiKeyStatusList[0])
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			truncateTables(t)
+			originalMemoryCacheEnabled := common.MemoryCacheEnabled
+			common.MemoryCacheEnabled = false
+			t.Cleanup(func() { common.MemoryCacheEnabled = originalMemoryCacheEnabled })
+			require.NoError(t, DB.Create(&tt.channel).Error)
+
+			assert.False(t, AutoDisableChannel(tt.channel.Id, tt.usingKey, tt.usingIndex, common.GetPointer(tt.channel.ChannelInfo.StateGeneration), "delayed failure", 401))
+
+			stored, err := GetChannelById(tt.channel.Id, true)
+			require.NoError(t, err)
+			tt.assertStored(t, *stored)
+		})
+	}
+}
+
+func TestAutoDisableChannelAllowsChannelWideDisableWithoutKey(t *testing.T) {
+	truncateTables(t)
+	originalMemoryCacheEnabled := common.MemoryCacheEnabled
+	common.MemoryCacheEnabled = false
+	t.Cleanup(func() { common.MemoryCacheEnabled = originalMemoryCacheEnabled })
+
+	channel := &Channel{
+		Name:    "channel-wide-disable",
+		Key:     "first-key\nsecond-key",
+		Status:  common.ChannelStatusEnabled,
+		AutoBan: common.GetPointer(1),
+		ChannelInfo: ChannelInfo{
+			IsMultiKey:   true,
+			MultiKeySize: 2,
+		},
+	}
+	require.NoError(t, DB.Create(channel).Error)
+
+	require.True(t, AutoDisableChannel(channel.Id, "", nil, nil, "余额不足", 0))
+
+	stored, err := GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.Status)
+	assert.Empty(t, stored.ChannelInfo.MultiKeyStatusList)
+}
+
+func TestAutoDisableChannelRejectsFailureBeforeManualReenable(t *testing.T) {
+	tests := []struct {
+		name    string
+		channel Channel
+		key     string
+		index   *int
+	}{
+		{
+			name: "单密钥",
+			channel: Channel{
+				Name:    "single-key-aba",
+				Key:     "single-key",
+				Status:  common.ChannelStatusEnabled,
+				AutoBan: common.GetPointer(1),
+			},
+			key: "single-key",
+		},
+		{
+			name: "多密钥",
+			channel: Channel{
+				Name:    "multi-key-aba",
+				Key:     "first-key\nsecond-key",
+				Status:  common.ChannelStatusEnabled,
+				AutoBan: common.GetPointer(1),
+				ChannelInfo: ChannelInfo{
+					IsMultiKey:   true,
+					MultiKeySize: 2,
+				},
+			},
+			key:   "second-key",
+			index: common.GetPointer(1),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			truncateTables(t)
+			originalMemoryCacheEnabled := common.MemoryCacheEnabled
+			common.MemoryCacheEnabled = false
+			t.Cleanup(func() { common.MemoryCacheEnabled = originalMemoryCacheEnabled })
+			require.NoError(t, DB.Create(&tt.channel).Error)
+
+			requestGeneration := int64(0)
+			require.True(t, UpdateChannelStatus(tt.channel.Id, tt.key, common.ChannelStatusManuallyDisabled, "manual disable"))
+			require.True(t, UpdateChannelStatus(tt.channel.Id, tt.key, common.ChannelStatusEnabled, "manual enable"))
+
+			assert.False(t, AutoDisableChannel(tt.channel.Id, tt.key, tt.index, &requestGeneration, "stale failure", 401))
+
+			stored, err := GetChannelById(tt.channel.Id, true)
+			require.NoError(t, err)
+			assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+			assert.Equal(t, int64(2), stored.ChannelInfo.StateGeneration)
+			if tt.index != nil {
+				assert.NotContains(t, stored.ChannelInfo.MultiKeyStatusList, *tt.index)
+			}
+		})
+	}
+}
+
+func TestChannelStatusByTagAdvancesStateGeneration(t *testing.T) {
+	truncateTables(t)
+	channel := &Channel{
+		Name:    "tag-status-generation",
+		Key:     "key",
+		Status:  common.ChannelStatusEnabled,
+		AutoBan: common.GetPointer(1),
+		Tag:     common.GetPointer("shared-tag"),
+	}
+	require.NoError(t, DB.Create(channel).Error)
+	require.NoError(t, DB.Create(&Ability{ChannelId: channel.Id, Group: "default", Model: "gpt-4o-mini", Enabled: true}).Error)
+
+	require.NoError(t, DB.Model(&Ability{}).Where("channel_id = ?", channel.Id).Update("enabled", false).Error)
+	require.NoError(t, EnableChannelByTag("shared-tag"))
+	var ability Ability
+	require.NoError(t, DB.Where("channel_id = ?", channel.Id).First(&ability).Error)
+	assert.True(t, ability.Enabled)
+
+	require.NoError(t, DisableChannelByTag("shared-tag"))
+	require.NoError(t, DB.Model(&Ability{}).Where("channel_id = ?", channel.Id).Update("enabled", true).Error)
+	require.NoError(t, DisableChannelByTag("shared-tag"))
+	require.NoError(t, DB.Where("channel_id = ?", channel.Id).First(&ability).Error)
+	assert.False(t, ability.Enabled)
+	require.NoError(t, EnableChannelByTag("shared-tag"))
+
+	requestGeneration := int64(0)
+	assert.False(t, AutoDisableChannel(channel.Id, channel.Key, nil, &requestGeneration, "stale failure", 401))
+	stored, err := GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+	assert.Equal(t, int64(2), stored.ChannelInfo.StateGeneration)
+}
+
+func TestEditChannelByTagAdvancesStateGeneration(t *testing.T) {
+	truncateTables(t)
+	oldOverride := `{"X-Request-Version":"old"}`
+	newOverride := `{"X-Request-Version":"new"}`
+	channel := &Channel{
+		Name:           "tag-edit-generation",
+		Key:            "key",
+		Status:         common.ChannelStatusEnabled,
+		AutoBan:        common.GetPointer(1),
+		Tag:            common.GetPointer("editable-tag"),
+		HeaderOverride: &oldOverride,
+	}
+	require.NoError(t, DB.Create(channel).Error)
+
+	require.NoError(t, EditChannelByTag("editable-tag", nil, nil, nil, nil, nil, nil, nil, &newOverride))
+
+	requestGeneration := int64(0)
+	assert.False(t, AutoDisableChannel(channel.Id, channel.Key, nil, &requestGeneration, "stale failure", 401))
+	stored, err := GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	require.NotNil(t, stored.HeaderOverride)
+	assert.Equal(t, newOverride, *stored.HeaderOverride)
+	assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+	assert.Equal(t, int64(1), stored.ChannelInfo.StateGeneration)
+}
+
+func TestCacheUpdateChannelIfNewerRejectsOlderOrEqualState(t *testing.T) {
+	truncateTables(t)
+	originalMemoryCacheEnabled := common.MemoryCacheEnabled
+	common.MemoryCacheEnabled = true
+	t.Cleanup(func() {
+		common.MemoryCacheEnabled = originalMemoryCacheEnabled
+		InitChannelCache()
+	})
+
+	channel := &Channel{
+		Name:    "admin-latest-channel",
+		Key:     "admin-key",
+		Status:  common.ChannelStatusEnabled,
+		Group:   "default",
+		Models:  "gpt-4o-mini",
+		AutoBan: common.GetPointer(0),
+		ChannelInfo: ChannelInfo{
+			StateGeneration:      2,
+			MultiKeyPollingIndex: 7,
+		},
+	}
+	require.NoError(t, DB.Create(channel).Error)
+	require.NoError(t, DB.Create(&Ability{ChannelId: channel.Id, Group: "default", Model: "gpt-4o-mini", Enabled: true}).Error)
+	InitChannelCache()
+	cached, err := CacheGetChannel(channel.Id)
+	require.NoError(t, err)
+	cached.ChannelInfo.MultiKeyPollingIndex = 7
+
+	for _, generation := range []int64{1, 2} {
+		CacheUpdateChannelIfNewer(&Channel{
+			Id:      channel.Id,
+			Name:    "stale-auto-disable",
+			Status:  common.ChannelStatusAutoDisabled,
+			AutoBan: common.GetPointer(1),
+			ChannelInfo: ChannelInfo{
+				StateGeneration: generation,
+			},
+		})
+		cached, err = CacheGetChannel(channel.Id)
+		require.NoError(t, err)
+		assert.Equal(t, "admin-latest-channel", cached.Name)
+		assert.Equal(t, "admin-key", cached.Key)
+		assert.Equal(t, common.ChannelStatusEnabled, cached.Status)
+		assert.False(t, cached.GetAutoBan())
+	}
+
+	CacheUpdateChannelIfNewer(&Channel{
+		Id:     channel.Id,
+		Name:   "new-auto-disable",
+		Status: common.ChannelStatusAutoDisabled,
+		ChannelInfo: ChannelInfo{
+			StateGeneration: 3,
+		},
+	})
+	cached, err = CacheGetChannel(channel.Id)
+	require.NoError(t, err)
+	assert.Equal(t, "new-auto-disable", cached.Name)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, cached.Status)
+	assert.Equal(t, 7, cached.ChannelInfo.MultiKeyPollingIndex)
+	assert.NotContains(t, group2model2channels["default"]["gpt-4o-mini"], channel.Id)
 }
 
 func TestChannelUpdateRejectsStaleMultiKeyGeneration(t *testing.T) {
@@ -245,10 +620,11 @@ func TestChannelUpdateRejectsStaleMultiKeyGeneration(t *testing.T) {
 	stale, err := GetChannelById(channel.Id, true)
 	require.NoError(t, err)
 
-	require.True(t, UpdateChannelStatusWithDisabledStatusCode(
+	require.True(t, AutoDisableChannel(
 		channel.Id,
 		"key-2",
-		common.ChannelStatusAutoDisabled,
+		common.GetPointer(1),
+		common.GetPointer(int64(0)),
 		"status_code=500, newer failure",
 		500,
 	))
