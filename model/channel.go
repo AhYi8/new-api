@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -675,6 +676,99 @@ func (channel *Channel) Delete() error {
 	}
 	err = channel.DeleteAbilities()
 	return err
+}
+
+// DeleteLongAutoDisabledSingleKeyChannels 硬删除自动禁用时长严格超过 threshold 的单密钥渠道。
+// 仅处理顶层 status 为自动禁用且 other_info.status_time 超期的单密钥渠道；
+// 手动禁用、多密钥渠道、缺少 status_time 的旧数据一律跳过（无法判定禁用时长，宁可漏删不可误删）。
+// 删除在事务内持行锁复核条件，避免与管理员并发编辑或测试恢复竞态误删。
+// 单个渠道删除失败只记录日志并继续，返回成功删除的渠道列表及首个遇到的错误。
+func DeleteLongAutoDisabledSingleKeyChannels(threshold time.Duration) ([]Channel, error) {
+	var candidates []*Channel
+	// 删除前会在事务内全量重读，候选阶段无需加载密钥明文
+	if err := DB.Omit("key").Where("status = ?", common.ChannelStatusAutoDisabled).Find(&candidates).Error; err != nil {
+		return nil, err
+	}
+	now := common.GetTimestamp()
+	thresholdSeconds := int64(threshold / time.Second)
+	var firstErr error
+	deleted := make([]Channel, 0)
+	for _, candidate := range candidates {
+		// 多密钥渠道的禁用状态在 ChannelInfo 中按密钥维护，不属于本清理范围
+		if candidate.ChannelInfo.IsMultiKey {
+			continue
+		}
+		if elapsedSinceStatusTime(candidate, now) <= thresholdSeconds {
+			continue
+		}
+		// 事务内持行锁复核最新状态，防止删除期间渠道被恢复、手动禁用或改造成多密钥渠道
+		var deletedChannel *Channel
+		err := DB.Transaction(func(tx *gorm.DB) error {
+			var fresh Channel
+			// 悲观锁在 SQLite 上退化为普通读，但 SQLite 写锁天然串行化整库写入，无竞态窗口
+			if err := lockForUpdate(tx).Where("id = ?", candidate.Id).First(&fresh).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil
+				}
+				return err
+			}
+			if fresh.Status != common.ChannelStatusAutoDisabled || fresh.ChannelInfo.IsMultiKey {
+				return nil
+			}
+			if elapsedSinceStatusTime(&fresh, now) <= thresholdSeconds {
+				return nil
+			}
+			if err := tx.Delete(&Channel{}, candidate.Id).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("channel_id = ?", candidate.Id).Delete(&Ability{}).Error; err != nil {
+				return err
+			}
+			deletedChannel = &fresh
+			return nil
+		})
+		if err != nil {
+			common.SysLog(fmt.Sprintf("清理长期自动禁用渠道失败: channel_id=%d, name=%s, error=%v", candidate.Id, candidate.Name, err))
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if deletedChannel != nil {
+			deleted = append(deleted, *deletedChannel)
+		}
+	}
+	return deleted, firstErr
+}
+
+// elapsedSinceStatusTime 返回渠道自 status_time 起经过的秒数；缺失或非法时返回 0。
+func elapsedSinceStatusTime(channel *Channel, now int64) int64 {
+	statusTime := parseOtherInfoStatusTime(channel)
+	if statusTime <= 0 {
+		return 0
+	}
+	return now - statusTime
+}
+
+// parseOtherInfoStatusTime 只读取 other_info 中的 status_time（Unix 秒），不重写其他键。
+func parseOtherInfoStatusTime(channel *Channel) int64 {
+	raw, ok := channel.GetOtherInfo()["status_time"]
+	if !ok {
+		return 0
+	}
+	// JSON 反序列化数值默认为 float64，兼容历史数据中可能存在的字符串形式
+	switch value := raw.(type) {
+	case float64:
+		return int64(value)
+	case string:
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return parsed
+	default:
+		return 0
+	}
 }
 
 // channelPollingLocks stores locks for each channel.id to ensure thread-safe polling

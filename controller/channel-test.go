@@ -923,6 +923,8 @@ type channelTestSummary struct {
 	KeySucceeded int `json:"key_succeeded"`
 	KeyFailed    int `json:"key_failed"`
 	KeyRecovered int `json:"key_recovered"`
+	// AutoDeletedChannels 定时运行时自动清理的长期自动禁用单密钥渠道数量
+	AutoDeletedChannels int `json:"auto_deleted_channels"`
 }
 
 type autoDisabledMultiKeyCandidate struct {
@@ -1266,6 +1268,18 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, report fu
 		if report != nil && (ctx == nil || ctx.Err() == nil) {
 			report(1000, 1000)
 		}
+		// 定时运行专属：清理自动禁用超过 30 天未恢复的单密钥渠道。
+		// 放在全部测试与密钥恢复之后，避免误删本轮刚恢复的渠道；手动触发不执行。
+		deleted, err := model.DeleteLongAutoDisabledSingleKeyChannels(longAutoDisabledChannelCleanupThreshold)
+		if err != nil {
+			// 清理失败不影响本轮测试结果，仅告警等待下次定时运行重试
+			common.SysLog(fmt.Sprintf("清理长期自动禁用的单密钥渠道失败: %v", err))
+		}
+		if len(deleted) > 0 {
+			summary.AutoDeletedChannels = len(deleted)
+			cacheChanged = true
+			notifyLongAutoDisabledChannelsDeleted(deleted)
+		}
 	}
 	if cacheChanged {
 		// 整轮只刷新一次，避免批量状态变化时对渠道和能力表反复全量扫描。
@@ -1275,6 +1289,22 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, report fu
 		service.NotifyRootUser(dto.NotifyTypeChannelTest, "通道测试完成", "所有通道测试已完成")
 	}
 	return summary, nil
+}
+
+// longAutoDisabledChannelCleanupThreshold 单密钥渠道自动禁用超过该时长未恢复即被定时任务清理。
+const longAutoDisabledChannelCleanupThreshold = 30 * 24 * time.Hour
+
+// notifyLongAutoDisabledChannelsDeleted 通知 root 用户本次定时运行清理的长期自动禁用渠道。
+// 渠道删除不可逆，绕过渠道状态通知偏好过滤，确保 root 用户总能获知。
+func notifyLongAutoDisabledChannelsDeleted(deleted []model.Channel) {
+	days := int(longAutoDisabledChannelCleanupThreshold / (24 * time.Hour))
+	var lines strings.Builder
+	for i, channel := range deleted {
+		lines.WriteString(fmt.Sprintf("\n%d. %s（ID: %d）", i+1, channel.Name, channel.Id))
+	}
+	service.NotifyRootUser(dto.NotifyTypeChannelUpdate,
+		"长期禁用渠道已自动清理",
+		fmt.Sprintf("以下单密钥渠道自动禁用超过 %d 天未恢复，已自动删除：%s", days, lines.String()))
 }
 
 func selectChannelsForAutomaticTest(channels []*model.Channel, mode string) []*model.Channel {
