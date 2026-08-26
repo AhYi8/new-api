@@ -453,8 +453,29 @@ function Invoke-ImageSmokeTest {
             throw (Get-Message -Key 'SmokeContainerStartFailed')
         }
 
-        $portOutput = Get-NativeOutput -Command 'docker' -Arguments @('port', $ContainerName, '3000/tcp')
-        if ($portOutput -notmatch ':(\d+)\s*$') {
+        # Docker Desktop 上 run --detach 返回后端口绑定信息偶发滞后，docker port 会短暂输出为空；
+        # 有界重试区分这种瞬时竞态与容器真正崩溃退出。
+        $portOutput = $null
+        $portResolved = $false
+        for ($attempt = 1; $attempt -le 15; $attempt++) {
+            $portOutput = Get-NativeOutput -Command 'docker' -Arguments @('port', $ContainerName, '3000/tcp')
+            if ($portOutput -match ':(\d+)\s*$') {
+                $portResolved = $true
+                break
+            }
+
+            $containerState = Get-NativeOutput -Command 'docker' -Arguments @('inspect', '--format', '{{.State.Running}}', $ContainerName)
+            if ($containerState -ne 'true') {
+                # 容器已退出，端口永远不会就绪，直接带日志失败以便定位启动崩溃原因
+                Write-Host (Get-Message -Key 'SmokeLogs')
+                & docker logs --tail 200 $ContainerName
+                throw (Get-Message -Key 'SmokeContainerStartFailed')
+            }
+            Start-Sleep -Seconds 1
+        }
+        if (-not $portResolved) {
+            Write-Host (Get-Message -Key 'SmokeLogs')
+            & docker logs --tail 200 $ContainerName
             throw (Get-Message -Key 'SmokePortParseFailed' -Values @($portOutput))
         }
         $statusUri = "http://127.0.0.1:$($Matches[1])/api/status"
