@@ -158,11 +158,14 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
 
       const {
         differences: diffs,
-        test_results,
+        test_results: testResults,
         ignored_locked_models: ignoredLockedModels,
-      } = data.data
+      } = data.data ?? {}
 
-      const errorResults = test_results.filter((r) => r.status === 'error')
+      // 后端 nil 切片会序列化为 null，统一兜底为空数组避免读取 length 崩溃
+      const errorResults = (testResults ?? []).filter(
+        (r) => r.status === 'error'
+      )
       if (errorResults.length > 0) {
         const errorMsg = errorResults
           .map((r) => `${r.name}: ${r.error}`)
@@ -170,18 +173,19 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
         toast.warning(t('Some channels failed: {{errorMsg}}', { errorMsg }))
       }
 
-      setDifferences(diffs)
+      setDifferences(diffs ?? {})
       setResolutions({})
 
-      if (ignoredLockedModels.length > 0) {
+      const lockedCount = (ignoredLockedModels ?? []).length
+      if (lockedCount > 0) {
         toast.info(
           t('Ignored {{count}} locked models', {
-            count: ignoredLockedModels.length,
+            count: lockedCount,
           })
         )
       }
 
-      if (Object.keys(diffs).length === 0) {
+      if (Object.keys(diffs ?? {}).length === 0) {
         toast.success(t('No price differences found'))
       } else {
         toast.success(t('Upstream prices fetched successfully'))
@@ -200,10 +204,13 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
         return
       }
       toast.success(t('Prices synced successfully'))
-      if (data.data.ignored_locked_models.length > 0) {
+      // 后端 nil 切片会序列化为 null，统一兜底为空数组避免读取 length 崩溃
+      const appliedModels = data.data?.applied_models ?? []
+      const ignoredLockedModels = data.data?.ignored_locked_models ?? []
+      if (ignoredLockedModels.length > 0) {
         toast.info(
           t('Ignored {{count}} models locked during sync', {
-            count: data.data.ignored_locked_models.length,
+            count: ignoredLockedModels.length,
           })
         )
       }
@@ -214,8 +221,8 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
         return applyPricingSyncResult(
           prevDiffs,
           resolutions,
-          data.data.applied_models,
-          data.data.ignored_locked_models
+          appliedModels,
+          ignoredLockedModels
         )
       })
 

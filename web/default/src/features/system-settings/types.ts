@@ -583,8 +583,9 @@ export type UpstreamRatiosResponse = {
   message: string
   data: {
     differences: DifferencesMap
-    test_results: TestResult[]
-    ignored_locked_models: string[]
+    // 后端 Go nil 切片会序列化为 null，以下数组字段均可能为 null
+    test_results: TestResult[] | null
+    ignored_locked_models: string[] | null
   }
 }
 
@@ -635,7 +636,8 @@ export type ApplyModelPricingSyncResponse = {
   success: boolean
   message: string
   data: {
-    applied_models: string[]
-    ignored_locked_models: string[]
+    // 后端 Go nil 切片会序列化为 null，以下数组字段均可能为 null
+    applied_models: string[] | null
+    ignored_locked_models: string[] | null
   }
 }
